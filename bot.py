@@ -30,13 +30,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Define Keyboard Buttons ---
+# --- Define Keyboard Buttons (تم إضافة زر Report 🚩) ---
 keyboard_buttons = [
     ["Search 🔎", "Next 🎲"], 
-    ["Stop ⏹️"]
+    ["Stop ⏹️", "Report 🚩"] # الزر الجديد هنا
 ]
 main_keyboard = ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
-button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲"]
+button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲", "Report 🚩"]
 
 # --- (1) Force Subscribe Helper Functions ---
 
@@ -65,7 +65,6 @@ async def send_join_channel_message(update: Update, context: ContextTypes.DEFAUL
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # تحديد المرسل (لأن الدالة قد تستدعى من رسالة أو من callback)
     if update.message:
         sender = update.message.reply_text
     elif update.callback_query:
@@ -88,17 +87,14 @@ async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer("Checking your membership...")
     
     if await is_user_subscribed(user_id, context):
-        # نجح التحقق: إزالة الأزرار وإظهار لوحة المفاتيح الرئيسية
         await query.edit_message_text(
             r"🎉 **Thank you for joining\!**" + "\n\n"
             r"You can now use the bot\. Press /start or use the buttons below\.",
             reply_markup=None, 
             parse_mode=constants.ParseMode.MARKDOWN_V2
         )
-        # (هام) إظهار لوحة المفاتيح الرئيسية
         await query.message.reply_text("Use the buttons below to control the chat:", reply_markup=main_keyboard)
     else:
-        # فشل التحقق
         await query.answer("Please subscribe to the channel first.", show_alert=True)
 
 # --- (2) Database Helper Functions ---
@@ -154,7 +150,7 @@ async def remove_from_wait_queue_db(user_id):
     async with db_pool.acquire() as connection:
         await connection.execute("DELETE FROM waiting_queue WHERE user_id = $1", user_id)
 
-# --- (3) Bot Command Handlers (Includes Report Feature) ---
+# --- (3) Bot Command Handlers ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -262,42 +258,63 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await connection.execute("INSERT INTO waiting_queue (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
                 logger.info(f"User {user_id} added/remains in DB queue (via /next).")
 
+# --- (4) New Report Command Handler ---
 
-# --- (4) Reporting Handler ---
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    
+    if not await is_user_subscribed(user_id, context):
+        await send_join_channel_message(update, context)
+        return
 
-async def handle_report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    يعالج ضغطة زر الإبلاغ ويرسل تنبيهاً مفصلاً للأدمن.
-    """
-    query = update.callback_query
-    reporter_id = query.from_user.id 
-    reported_id = int(query.data.split('_')[1])
+    # 1. البحث عن الشريك (المُبلغ عنه)
+    reported_id = await get_partner_from_db(user_id)
     
-    # 1. الرد على المُبلِّغ
-    await query.answer("Thank you! Your report has been successfully sent to Telegram team")
+    if not reported_id:
+        if await is_user_waiting_db(user_id):
+            await update.message.reply_text("You cannot report while searching. Use 'Stop ⏹️' first.")
+        else:
+            await update.message.reply_text("You are not currently in a chat to report anyone.", reply_markup=main_keyboard)
+        return
     
-    # 2. إرسال التنبيه للأدمن (في قناة LOG_CHANNEL_ID)
+    # 2. إرسال التقرير المفصل إلى الأدمن
     if LOG_CHANNEL_ID:
         try:
             await context.bot.send_message(
                 chat_id=LOG_CHANNEL_ID,
-                text=f"🚨 **NEW REPORT RECEIVED** 🚨\n\n"
+                text=f"🚨 **NEW REPORT RECEIVED (End Chat)** 🚨\n\n"
                      f"**Reported User ID (المُبلغ عنه):** `{reported_id}`\n"
-                     f"**Reporter User ID (المُبلِّغ):** `{reporter_id}`\n\n"
-                     f"Please review the messages above this alert for context.",
+                     f"**Reporter User ID (المُبلِّغ):** `{user_id}`\n\n"
+                     f"**Action:** Chat automatically terminated.",
                 parse_mode=constants.ParseMode.MARKDOWN
             )
-            
         except Exception as e:
             logger.error(f"Failed to process report for {reported_id}: {e}")
 
-# --- (5) Relay Message Handler ---
+    # 3. إنهاء المحادثة لكلا الطرفين
+    partner_id = await end_chat_in_db(user_id)
+    
+    # 4. إرسال رسالة التأكيد للمستخدم (المُبلِّغ)
+    await update.message.reply_text(
+        "Thank you! Your report has been successfully sent to the Telegram Team for review. The chat has ended.",
+        reply_markup=main_keyboard
+    )
+    
+    # 5. إخطار الشريك المُبلغ عنه (إذا أمكن)
+    if partner_id:
+        logger.info(f"Chat ended by {user_id} (via Report). Partner was {partner_id}.")
+        try:
+            await context.bot.send_message(chat_id=partner_id, text="⚠️ Your partner has ended the chat.", reply_markup=main_keyboard)
+        except (Forbidden, BadRequest) as e:
+            logger.warning(f"Could not notify partner {partner_id} about chat end: {e}")
+
+
+# --- (5) Relay Message Handler (تم إزالة زر التبليغ المضمن) ---
 
 async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.message.from_user.id
     message = update.message
     
-    # --- (التحقق من الاشتراك أولاً) ---
     if not await is_user_subscribed(sender_id, context):
         await send_join_channel_message(update, context)
         return
@@ -307,13 +324,6 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
     if not partner_id:
         await message.reply_text("You are not in a chat. Press 'Search' to start.", reply_markup=main_keyboard)
         return
-        
-    # --- إعداد زر الإبلاغ (يحتوي على ID المُبلغ عنه) ---
-    report_keyboard = [[
-        InlineKeyboardButton("🚨 Report User", callback_data=f"report_{sender_id}")
-    ]]
-    report_markup = InlineKeyboardMarkup(report_keyboard)
-    # -----------------------------------------------
 
     # --- Step 1: Log the message (إرسال نسخة للأرشيف) ---
     if LOG_CHANNEL_ID:
@@ -328,18 +338,18 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             logger.error(f"CRITICAL: Failed to log message to {LOG_CHANNEL_ID}: {e}")
             
-    # --- Step 2: Relay the message (ترحيل محمي مع زر الإبلاغ) ---
+    # --- Step 2: Relay the message (ترحيل محمي بدون زر إبلاغ) ---
     try:
         protect = True
         
-        # (استخدام زر الإبلاغ لكل الرسائل المرحّلة)
+        # لا يوجد report_markup هنا
         
-        if message.photo: await context.bot.send_photo(chat_id=partner_id, photo=message.photo[-1].file_id, caption=message.caption, protect_content=protect, reply_markup=report_markup)
-        elif message.document: await context.bot.send_document(chat_id=partner_id, document=message.document.file_id, caption=message.caption, protect_content=protect, reply_markup=report_markup)
-        elif message.video: await context.bot.send_video(chat_id=partner_id, video=message.video.file_id, caption=message.caption, protect_content=protect, reply_markup=report_markup)
-        elif message.sticker: await context.bot.send_sticker(chat_id=partner_id, sticker=message.sticker.file_id, protect_content=protect, reply_markup=report_markup)
-        elif message.voice: await context.bot.send_voice(chat_id=partner_id, voice=message.voice.file_id, caption=message.caption, protect_content=protect, reply_markup=report_markup)
-        elif message.text: await context.bot.send_message(chat_id=partner_id, text=message.text, protect_content=protect, reply_markup=report_markup)
+        if message.photo: await context.bot.send_photo(chat_id=partner_id, photo=message.photo[-1].file_id, caption=message.caption, protect_content=protect)
+        elif message.document: await context.bot.send_document(chat_id=partner_id, document=message.document.file_id, caption=message.caption, protect_content=protect)
+        elif message.video: await context.bot.send_video(chat_id=partner_id, video=message.video.file_id, caption=message.caption, protect_content=protect)
+        elif message.sticker: await context.bot.send_sticker(chat_id=partner_id, sticker=message.sticker.file_id, protect_content=protect)
+        elif message.voice: await context.bot.send_voice(chat_id=partner_id, voice=message.voice.file_id, caption=message.caption, protect_content=protect)
+        elif message.text: await context.bot.send_message(chat_id=partner_id, text=message.text, protect_content=protect)
         
     except (Forbidden, BadRequest) as e:
         if "bot was blocked" in str(e).lower() or "user is deactivated" in str(e).lower() or "chat not found" in str(e).lower():
@@ -375,20 +385,21 @@ def main():
 
     # إضافة معالج زر التحقق من الاشتراك
     application.add_handler(CallbackQueryHandler(handle_join_check, pattern="^check_join$"))
-    # إضافة معالج زر الإبلاغ
-    application.add_handler(CallbackQueryHandler(handle_report_callback, pattern="^report_"))
+    # تم إزالة معالج التبليغ القديم (CallbackQueryHandler)
     
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("end", end_command))
     application.add_handler(CommandHandler("next", next_command))
+    
+    # معالجات الأزرار النصية
     application.add_handler(MessageHandler(filters.Text(["Search 🔎"]), search_command))
     application.add_handler(MessageHandler(filters.Text(["Stop ⏹️"]), end_command))
-    
     application.add_handler(MessageHandler(filters.Text(["Next 🎲"]), next_command))
+    application.add_handler(MessageHandler(filters.Text(["Report 🚩"]), report_command)) # معالج التبليغ الجديد
     
-    # المعالج الرئيسي
-    button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲"]
+    # المعالج الرئيسي للرسائل
+    button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲", "Report 🚩"]
     
     application.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.Text(button_texts),
