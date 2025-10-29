@@ -9,7 +9,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 # --- Settings ---
 try:
     # (تم التعديل لقراءة BOT_TOKEN)
-    TELEGRAM_TOKEN = os.environ['BOT_TOKEN'] 
+    TELEGRAM_TOKEN = os.environ['BOT_TOKEN']
     DATABASE_URL = os.environ['DATABASE_URL']
     CHANNEL_ID = os.environ['CHANNEL_ID']
     CHANNEL_INVITE_LINK = os.environ['CHANNEL_INVITE_LINK']
@@ -27,7 +27,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Define Keyboard Buttons ---
-# --- (تم التعديل: إضافة النرد) ---
 keyboard_buttons = [
     ["Search 🔎", "Next 🎲"], # <--- اسم الزر الجديد
     ["Stop ⏹️"]
@@ -91,4 +90,70 @@ async def init_database():
         return False
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL)
-        async with db
+        # --- (This is the corrected line 94 area) ---
+        async with db_pool.acquire() as connection: # <--- Make sure this line is complete
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS active_chats (
+                    user_id BIGINT PRIMARY KEY,
+                    partner_id BIGINT NOT NULL UNIQUE
+                );
+            ''')
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS waiting_queue (
+                    user_id BIGINT PRIMARY KEY,
+                    timestamp TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC')
+                );
+            ''')
+        # -------------------------------------------
+        logger.info("Database connected and tables verified.")
+        return True
+    except Exception as e:
+        logger.critical(f"CRITICAL: Failed to connect to database: {e}")
+        return False
+
+async def get_partner_from_db(user_id):
+    if not db_pool: return None
+    async with db_pool.acquire() as connection:
+        return await connection.fetchval("SELECT partner_id FROM active_chats WHERE user_id = $1", user_id)
+
+async def is_user_waiting_db(user_id):
+    if not db_pool: return False
+    async with db_pool.acquire() as connection:
+        return await connection.fetchval("SELECT 1 FROM waiting_queue WHERE user_id = $1", user_id) is not None
+
+async def end_chat_in_db(user_id):
+    if not db_pool: return None
+    async with db_pool.acquire() as connection:
+        async with connection.transaction():
+            partner_id = await connection.fetchval("DELETE FROM active_chats WHERE user_id = $1 RETURNING partner_id", user_id)
+            if partner_id:
+                await connection.execute("DELETE FROM active_chats WHERE user_id = $1", partner_id)
+            return partner_id
+
+async def remove_from_wait_queue_db(user_id):
+    if not db_pool: return
+    async with db_pool.acquire() as connection:
+        await connection.execute("DELETE FROM waiting_queue WHERE user_id = $1", user_id)
+
+# --- Bot Command Handlers ---
+
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if not await is_user_subscribed(user_id, context):
+        await send_join_channel_message(update, context)
+        return
+    if await get_partner_from_db(user_id):
+        await update.message.reply_text("You are currently in a chat. Use the buttons below.", reply_markup=main_keyboard)
+    elif await is_user_waiting_db(user_id):
+        await update.message.reply_text("You are currently in the waiting queue. Use the buttons below.", reply_markup=main_keyboard)
+    else:
+        await update.message.reply_text(
+            "Welcome to the Anonymous Chat Bot! 🕵️‍♂️\n\n"
+            "Press 'Search' to find a partner.\n\n"
+            "🔒 **Note:** All media in this chat is **protected**.",
+            reply_markup=main_keyboard
+        )
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if not await is_user_subscribed(user_
