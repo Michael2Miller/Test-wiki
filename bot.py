@@ -2,17 +2,22 @@ import os
 import asyncio
 import asyncpg
 import logging
-import re # <--- (إضافة مكتبة التعبير النمطي للتحقق من الروابط)
+import re
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, constants
 from telegram.error import BadRequest, Forbidden
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 # --- Settings & Environment Variables ---
 try:
+    # المتغيرات الأساسية للتشغيل
     TELEGRAM_TOKEN = os.environ['BOT_TOKEN']
     DATABASE_URL = os.environ['DATABASE_URL']
+    
+    # متغيرات الاشتراك الإجباري
     CHANNEL_ID = os.environ['CHANNEL_ID']
     CHANNEL_INVITE_LINK = os.environ['CHANNEL_INVITE_LINK']
+    
+    # متغير اختياري
     LOG_CHANNEL_ID = os.environ.get('LOG_CHANNEL_ID') 
 except KeyError as e:
     logging.critical(f"CRITICAL: Missing environment variable {e}. Bot cannot start.")
@@ -26,16 +31,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Define Keyboard Buttons ---
+# --- Define Keyboard Buttons (تم عكس ترتيب Stop و Report) ---
 keyboard_buttons = [
     ["Search 🔎", "Next 🎲"], 
-    ["Stop ⏹️", "Report User 🚨"]
+    ["Report User 🚨", "Stop ⏹️"] # <--- التعديل تم هنا
 ]
 main_keyboard = ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
-button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲", "Report User 🚨"]
+button_texts = ["Search 🔎", "Next 🎲", "Report User 🚨", "Stop ⏹️"]
 
-# --- (1) Force Subscribe Helper Functions (لا تغيير) ---
+# --- (1) Force Subscribe Helper Functions ---
+
 async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """تتحقق مما إذا كان المستخدم عضواً في القناة."""
     try:
         member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
         return member.status in ['member', 'administrator', 'creator']
@@ -50,6 +57,7 @@ async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
         return False
 
 async def send_join_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ترسل رسالة الاشتراك الإجباري."""
     keyboard = [
         [
             InlineKeyboardButton("🔗 Join Channel", url=CHANNEL_INVITE_LINK),
@@ -74,6 +82,7 @@ async def send_join_channel_message(update: Update, context: ContextTypes.DEFAUL
     )
 
 async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعالج ضغطة زر '✅ I have joined' للتحقق من الاشتراك."""
     query = update.callback_query
     user_id = query.from_user.id
     await query.answer("Checking your membership...")
@@ -89,9 +98,10 @@ async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.answer("Please subscribe to the channel first.", show_alert=True)
 
-# --- (2) Database Helper Functions (لا تغيير) ---
+# --- (2) Database Helper Functions ---
 
 async def init_database():
+    """يتصل بقاعدة البيانات وينشئ الجداول."""
     global db_pool
     if not DATABASE_URL:
         logger.critical("CRITICAL: DATABASE_URL not found. Bot cannot start.")
@@ -141,7 +151,7 @@ async def remove_from_wait_queue_db(user_id):
     async with db_pool.acquire() as connection:
         await connection.execute("DELETE FROM waiting_queue WHERE user_id = $1", user_id)
 
-# --- (3) Bot Command Handlers (لا تغيير في الدوال نفسها) ---
+# --- (3) Bot Command Handlers ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -285,7 +295,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 3. إنهاء المحادثة لكلا الطرفين
     partner_id = await end_chat_in_db(user_id)
     
-    # 4. إرسال رسالة التأكيد للمستخدم (المُبلِّغ) 
+    # 4. إرسال رسالة التأكيد للمستخدم (المُبلِّغ)
     await update.message.reply_text(
         "🚨 Thank you! Your report has been successfully sent to the Telegram Team for review.\n\n"
         "You ended the chat with the reported user.\n\n"
@@ -301,7 +311,9 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (Forbidden, BadRequest) as e:
             logger.warning(f"Could not notify partner {partner_id} about chat end: {e}")
 
+
 # --- (5) Relay Message Handler ---
+
 # Regular expression to find common URL/link patterns (including t.me and www)
 URL_PATTERN = re.compile(
     r'(https?://|www\.|t\.me/|t\.co/|telegram\.me/|telegram\.dog/)' # Common prefixes
@@ -331,7 +343,7 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
             await message.reply_text("🚫 Sending links or URLs is not allowed to maintain anonymity.", reply_markup=main_keyboard)
             return
     # --- (END NEW FILTER) ---
-
+    
     partner_id = await get_partner_from_db(sender_id)
     
     if not partner_id:
@@ -351,9 +363,11 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             logger.error(f"CRITICAL: Failed to log message to {LOG_CHANNEL_ID}: {e}")
             
-    # --- Step 2: Relay the message (ترحيل محمي) ---
+    # --- Step 2: Relay the message (ترحيل محمي بدون زر إبلاغ) ---
     try:
         protect = True
+        
+        # لا يوجد report_markup هنا
         
         if message.photo: await context.bot.send_photo(chat_id=partner_id, photo=message.photo[-1].file_id, caption=message.caption, protect_content=protect)
         elif message.document: await context.bot.send_document(chat_id=partner_id, document=message.document.file_id, caption=message.caption, protect_content=protect)
@@ -379,7 +393,7 @@ async def post_database_init(application: Application):
     if not await init_database():
         raise RuntimeError("Database connection failed. Aborting startup.")
     if not LOG_CHANNEL_ID:
-        logger.warning("WARNING: LOG_CHANNEL_ID not found. Logging/archiving is DISABLED.")
+        logger.warning("WARNING: LOG_CHANNEL_ID not found. Logging/ar chiving is DISABLED.")
     logger.info("Database connected. Bot is ready to start polling...")
 
 def main():
@@ -407,7 +421,7 @@ def main():
     application.add_handler(MessageHandler(filters.Text(["Stop ⏹️"]), end_command))
     
     application.add_handler(MessageHandler(filters.Text(["Next 🎲"]), next_command))
-    application.add_handler(MessageHandler(filters.Text(["Report User 🚨"]), report_command)) 
+    application.add_handler(MessageHandler(filters.Text(["Report User 🚨"]), report_command)) # معالج التبليغ الجديد
     
     # المعالج الرئيسي للرسائل
     button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲", "Report User 🚨"]
