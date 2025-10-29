@@ -2,7 +2,6 @@ import os
 import asyncio
 import asyncpg
 import logging
-import re
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, constants
 from telegram.error import BadRequest, Forbidden
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
@@ -27,20 +26,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Define Keyboard Buttons ---
+# --- Define Keyboard Buttons (الترتيب النهائي) ---
 keyboard_buttons = [
     ["Search 🔎", "Next 🎲"], 
     ["Block User 🚫", "Stop ⏹️"] 
 ]
 main_keyboard = ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 button_texts = ["Search 🔎", "Next 🎲", "Block User 🚫", "Stop ⏹️"]
-
-# --- NEW: URL and Username Pattern Definition ---
-URL_PATTERN = re.compile(
-    r'(https?://|www\.|t\.me/|t\.co/|telegram\.me/|telegram\.dog/)'
-    r'[\w\.-]+(\.[\w\.-]+)*([\w\-\._~:/\?#\[\]@!$&\'()*+,;=])*',
-    re.IGNORECASE
-)
 
 # --- Define Confirmation Keyboard ---
 async def get_confirmation_keyboard(reported_id):
@@ -53,6 +45,7 @@ async def get_confirmation_keyboard(reported_id):
 # --- (1) Force Subscribe Helper Functions ---
 
 async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """تتحقق مما إذا كان المستخدم عضواً في القناة."""
     try:
         member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
         return member.status in ['member', 'administrator', 'creator']
@@ -88,8 +81,8 @@ async def send_join_channel_message(update: Update, context: ContextTypes.DEFAUL
         r"To use this bot, you are required to join our official channel\." + "\n\n"
         r"Please join the channel using the button below, then press '✅ I have joined'\.",
         reply_markup=reply_markup,
-        protect_content=True,
-        parse_mode=constants.ParseMode.MARKDOWN_V2
+        parse_mode=constants.ParseMode.MARKDOWN_V2,
+        protect_content=True
     )
 
 async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -105,15 +98,17 @@ async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=None, 
             parse_mode=constants.ParseMode.MARKDOWN_V2
         )
-        await query.message.reply_text(
-            "Use the buttons below to control the chat:", 
-            reply_markup=main_keyboard,
-            protect_content=True
-        )
+        await query.message.reply_text("Use the buttons below to control the chat:", reply_markup=main_keyboard, protect_content=True)
     else:
         await query.answer("Please subscribe to the channel first.", show_alert=True)
 
 # --- (2) Database Helper Functions ---
+
+async def is_user_globally_banned(user_id):
+    """(جديد) يتحقق مما إذا كان المستخدم محظوراً بشكل شامل."""
+    if not db_pool: return False
+    async with db_pool.acquire() as connection:
+        return await connection.fetchval("SELECT 1 FROM global_bans WHERE user_id = $1", user_id) is not None
 
 async def init_database():
     """يتصل بقاعدة البيانات وينشئ الجداول."""
@@ -148,7 +143,7 @@ async def init_database():
                     PRIMARY KEY (blocker_id, blocked_id)
                 );
             ''')
-            # --- (جدول الحظر الكلي الجديد) ---
+            # --- (جدول الحظر الشامل الجديد) ---
             await connection.execute('''
                 CREATE TABLE IF NOT EXISTS global_bans (
                     user_id BIGINT PRIMARY KEY
@@ -177,6 +172,7 @@ async def get_all_users():
     if not db_pool: return []
     async with db_pool.acquire() as connection:
         return await connection.fetchval("SELECT ARRAY_AGG(user_id) FROM all_users") or []
+
 
 async def get_partner_from_db(user_id):
     if not db_pool: return None
@@ -211,31 +207,25 @@ async def add_user_block(blocker_id, blocked_id):
             blocker_id, blocked_id
         )
 
-async def is_user_globally_banned(user_id):
-    """(جديد) يتحقق مما إذا كان المستخدم محظوراً حظراً كلياً من البوت."""
-    if not db_pool: return False
-    async with db_pool.acquire() as connection:
-        return await connection.fetchval("SELECT 1 FROM global_bans WHERE user_id = $1", user_id) is not None
-
-
 # --- (3) Bot Command Handlers ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    await add_user_to_all_list(user_id)
     
-    # 🛑 (جديد) التحقق من الحظر الكلي أولاً
+    # 🛑 (التحقق من الحظر الشامل) 🛑
     if await is_user_globally_banned(user_id):
-        await update.message.reply_text("Your access to this bot has been permanently suspended.", protect_content=True)
+        await update.message.reply_text("🚫 Your access to this bot has been permanently suspended.", protect_content=True)
         return
+    
+    await add_user_to_all_list(user_id)
     
     if not await is_user_subscribed(user_id, context):
         await send_join_channel_message(update, context)
         return
     if await get_partner_from_db(user_id):
-        await update.message.reply_text("You are currently in a chat. Use the buttons below.", reply_markup=main_keyboard, protect_content=True) 
+        await update.message.reply_text("You are currently in a chat. Use the buttons below.", reply_markup=main_keyboard, protect_content=True)
     elif await is_user_waiting_db(user_id):
-        await update.message.reply_text("You are currently in the waiting queue. Use the buttons below.", reply_markup=main_keyboard, protect_content=True) 
+        await update.message.reply_text("You are currently in the waiting queue. Use the buttons below.", reply_markup=main_keyboard, protect_content=True)
     else:
         await update.message.reply_text(
             "Welcome to the Anonymous Chat Bot! 🕵️‍♂️\n\n"
@@ -247,16 +237,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    if await is_user_globally_banned(user_id): return # 🛑 حظر كلي
-    
+    # 🛑 (التحقق من الحظر الشامل) 🛑
+    if await is_user_globally_banned(user_id):
+        await update.message.reply_text("🚫 Your access to this bot has been permanently suspended.", protect_content=True)
+        return
+
     if not await is_user_subscribed(user_id, context):
         await send_join_channel_message(update, context)
         return
     if await get_partner_from_db(user_id):
-        await update.message.reply_text("You are already in a chat! Press 'Stop' or 'Next' first.", protect_content=True) 
+        await update.message.reply_text("You are already in a chat! Press 'Stop' or 'Next' first.", protect_content=True)
         return
     if await is_user_waiting_db(user_id):
-        await update.message.reply_text("You are already searching. Please wait...", protect_content=True) 
+        await update.message.reply_text("You are already searching. Please wait...", protect_content=True)
         return
     
     # --- (تعديل استعلام البحث لاستبعاد المستخدمين المحظورين) ---
@@ -271,7 +264,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     WHERE user_id != $1 
                       AND user_id NOT IN (SELECT blocked_id FROM user_blocks WHERE blocker_id = $1)
                       AND $1 NOT IN (SELECT blocked_id FROM user_blocks WHERE blocker_id = user_id)
-                      AND user_id NOT IN (SELECT user_id FROM global_bans) -- 🛑 استبعاد المحظورين كليا
+                      AND user_id NOT IN (SELECT user_id FROM global_bans)
                     ORDER BY timestamp ASC LIMIT 1
                 )
                 WHERE user_id IN (SELECT user_id FROM waiting_queue WHERE user_id != $1)
@@ -283,55 +276,61 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if partner_id:
                 await connection.execute("INSERT INTO active_chats (user_id, partner_id) VALUES ($1, $2), ($2, $1)", user_id, partner_id)
                 logger.info(f"Match found! {user_id} <-> {partner_id}.")
-                await context.bot.send_message(chat_id=user_id, text="✅ Partner found! The chat has started. (You are anonymous).", reply_markup=main_keyboard, protect_content=True) 
-                await context.bot.send_message(chat_id=partner_id, text="✅ Partner found! The chat has started. (You are anonymous).", reply_markup=main_keyboard, protect_content=True) 
+                await context.bot.send_message(chat_id=user_id, text="✅ Partner found! The chat has started. (You are anonymous).", reply_markup=main_keyboard, protect_content=True)
+                await context.bot.send_message(chat_id=partner_id, text="✅ Partner found! The chat has started. (You are anonymous).", reply_markup=main_keyboard, protect_content=True)
             else:
                 await connection.execute("INSERT INTO waiting_queue (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
-                await update.message.reply_text("🔎 Searching for a partner... Please wait.", protect_content=True) 
+                await update.message.reply_text("🔎 Searching for a partner... Please wait.", protect_content=True)
                 logger.info(f"User {user_id} added to DB queue.")
 
 async def end_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    if await is_user_globally_banned(user_id): return # 🛑 حظر كلي
-    
+    # 🛑 (التحقق من الحظر الشامل) 🛑
+    if await is_user_globally_banned(user_id):
+        await update.message.reply_text("🚫 Your access to this bot has been permanently suspended.", protect_content=True)
+        return
+
     if not await is_user_subscribed(user_id, context):
         await send_join_channel_message(update, context)
         return
     partner_id = await end_chat_in_db(user_id)
     if partner_id:
         logger.info(f"Chat ended by {user_id}. Partner was {partner_id}.")
-        await context.bot.send_message(chat_id=user_id, text="🔚 You have ended the chat.", reply_markup=main_keyboard, protect_content=True) 
+        await context.bot.send_message(chat_id=user_id, text="🔚 You have ended the chat.", reply_markup=main_keyboard, protect_content=True)
         try:
-            await context.bot.send_message(chat_id=partner_id, text="⚠️ Your partner has left the chat.", reply_markup=main_keyboard, protect_content=True) 
+            await context.bot.send_message(chat_id=partner_id, text="⚠️ Your partner has left the chat.", reply_markup=main_keyboard, protect_content=True)
         except (Forbidden, BadRequest) as e:
              logger.warning(f"Could not notify partner {partner_id} about chat end: {e}")
     elif await is_user_waiting_db(user_id):
         await remove_from_wait_queue_db(user_id)
         logger.info(f"User {user_id} cancelled search.")
-        await update.message.reply_text("Search cancelled.", reply_markup=main_keyboard, protect_content=True) 
+        await update.message.reply_text("Search cancelled.", reply_markup=main_keyboard, protect_content=True)
     else:
-        await update.message.reply_text("You are not currently in a chat or searching.", reply_markup=main_keyboard, protect_content=True) 
+        await update.message.reply_text("You are not currently in a chat or searching.", reply_markup=main_keyboard, protect_content=True)
 
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    if await is_user_globally_banned(user_id): return # 🛑 حظر كلي
-    
+    # 🛑 (التحقق من الحظر الشامل) 🛑
+    if await is_user_globally_banned(user_id):
+        await update.message.reply_text("🚫 Your access to this bot has been permanently suspended.", protect_content=True)
+        return
+
     if not await is_user_subscribed(user_id, context):
         await send_join_channel_message(update, context)
         return
     partner_id = await end_chat_in_db(user_id)
     if partner_id:
         logger.info(f"Chat ended by {user_id} (via /next). Partner was {partner_id}.")
-        await context.bot.send_message(chat_id=user_id, text="🔚 Chat ended. Searching for new partner...", protect_content=True) 
+        await context.bot.send_message(chat_id=user_id, text="🔚 Chat ended. Searching for new partner...", protect_content=True)
         try:
-            await context.bot.send_message(chat_id=partner_id, text="⚠️ Your partner has left the chat.", reply_markup=main_keyboard, protect_content=True) 
+            await context.bot.send_message(chat_id=partner_id, text="⚠️ Your partner has left the chat.", reply_markup=main_keyboard, protect_content=True)
         except (Forbidden, BadRequest) as e:
             logger.warning(f"Could not notify partner {partner_id} about chat end: {e}")
     elif await is_user_waiting_db(user_id):
-        await update.message.reply_text("You are already searching. Please wait...", protect_content=True) 
+        await update.message.reply_text("You are already searching. Please wait...", protect_content=True)
         return
     else:
-        await update.message.reply_text("🔎 Searching for a partner... Please wait.", protect_content=True) 
+        await update.message.reply_text("🔎 Searching for a partner... Please wait.", protect_content=True)
 
     # --- (تعديل استعلام البحث لاستبعاد المستخدمين المحظورين) ---
     async with db_pool.acquire() as connection:
@@ -345,7 +344,7 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     WHERE user_id != $1 
                       AND user_id NOT IN (SELECT blocked_id FROM user_blocks WHERE blocker_id = $1)
                       AND $1 NOT IN (SELECT blocked_id FROM user_blocks WHERE blocker_id = user_id)
-                      AND user_id NOT IN (SELECT user_id FROM global_bans) -- 🛑 استبعاد المحظورين كليا
+                      AND user_id NOT IN (SELECT user_id FROM global_bans)
                     ORDER BY timestamp ASC LIMIT 1
                 )
                 RETURNING user_id
@@ -356,17 +355,18 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if partner_id_new:
                 await connection.execute("INSERT INTO active_chats (user_id, partner_id) VALUES ($1, $2), ($2, $1)", user_id, partner_id_new)
                 logger.info(f"Match found! {user_id} <-> {partner_id_new}.")
-                await context.bot.send_message(chat_id=user_id, text="✅ Partner found! The chat has started.", reply_markup=main_keyboard, protect_content=True) 
-                await context.bot.send_message(chat_id=partner_id_new, text="✅ Partner found! The chat has started.", reply_markup=main_keyboard, protect_content=True) 
+                await context.bot.send_message(chat_id=user_id, text="✅ Partner found! The chat has started.", reply_markup=main_keyboard, protect_content=True)
+                await context.bot.send_message(chat_id=partner_id_new, text="✅ Partner found! The chat has started. (You are anonymous).", reply_markup=main_keyboard, protect_content=True)
             else:
                 await connection.execute("INSERT INTO waiting_queue (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
                 logger.info(f"User {user_id} added/remains in DB queue (via /next).")
 
-# --- (NEW) Admin Global Ban Command ---
+# --- (NEW) Admin Global Ban Commands ---
 
 async def banuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     
+    # 1. التحقق من أن المستخدم هو الأدمن
     if user_id != ADMIN_ID:
         await update.message.reply_text("🚫 Access denied. Admin command only.", protect_content=True)
         return
@@ -378,18 +378,18 @@ async def banuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         banned_id = int(context.args[0])
         
-        # 1. تسجيل الحظر في جدول global_bans
+        # 2. تسجيل الحظر في جدول global_bans
         async with db_pool.acquire() as connection:
             await connection.execute(
                 "INSERT INTO global_bans (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
                 banned_id
             )
         
-        # 2. إخراج المستخدم من أي محادثة حالية أو قائمة انتظار
+        # 3. إخراج المستخدم من أي محادثة حالية أو قائمة انتظار (للتنظيف)
         await end_chat_in_db(banned_id)
         await remove_from_wait_queue_db(banned_id)
         
-        # 3. إخطار الأدمن
+        # 4. إخطار الأدمن
         await update.message.reply_text(f"✅ User ID {banned_id} has been permanently blocked from using the chat features.", protect_content=True)
         
     except ValueError:
@@ -398,44 +398,16 @@ async def banuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error banning user: {e}")
         await update.message.reply_text(f"❌ An error occurred during the ban process: {e}", protect_content=True)
 
-# --- (NEW) Admin Direct Message Command ---
+# --- (4) Report Command Handler (لا تغيير) ---
 
-async def sendid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("🚫 Access denied. This command is for the administrator only.", protect_content=True)
+    # 🛑 (التحقق من الحظر الشامل) 🛑
+    if await is_user_globally_banned(user_id):
+        await update.message.reply_text("🚫 Your access to this bot has been permanently suspended.", protect_content=True)
         return
-
-    if len(context.args) < 2:
-        await update.message.reply_text("Usage: /sendid <Recipient_User_ID> <Your Message>", protect_content=True)
-        return
-
-    try:
-        target_id = int(context.args[0])
-        message_to_send = " ".join(context.args[1:])
         
-        # 1. محاولة الإرسال (حماية مضافة)
-        await context.bot.send_message(
-            chat_id=target_id,
-            text=f"📢 **Admin Message:**\n\n{message_to_send}",
-            parse_mode='Markdown',
-            protect_content=True
-        )
-        
-        # 2. تأكيد الإرسال للأدمن
-        await update.message.reply_text(f"✅ Message sent successfully to User ID: {target_id}", protect_content=True)
-        
-    except BadRequest as e:
-        await update.message.reply_text(f"❌ Failed to send: User ID {target_id} is unreachable or invalid. Error: {e.message}", protect_content=True)
-    except Exception as e:
-        await update.message.reply_text(f"❌ An unexpected error occurred: {e}", protect_content=True)
-
-# --- (NEW) Block User Handlers (Confirmation) ---
-
-async def block_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    
     if not await is_user_subscribed(user_id, context):
         await send_join_channel_message(update, context)
         return
@@ -444,12 +416,12 @@ async def block_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     if not reported_id:
         if await is_user_waiting_db(user_id):
-            await update.message.reply_text("You cannot block anyone while searching. Use 'Stop ⏹️' first.", protect_content=True) 
+            await update.message.reply_text("You cannot block anyone while searching. Use 'Stop ⏹️' first.", protect_content=True)
         else:
-            await update.message.reply_text("You are not currently in a chat to block anyone.", reply_markup=main_keyboard, protect_content=True) 
+            await update.message.reply_text("You are not currently in a chat to block anyone.", reply_markup=main_keyboard, protect_content=True)
         return
     
-    # 1. إرسال رسالة التأكيد مع الأزرار المضمنة (كما هو مطلوب)
+    # 2. إرسال رسالة التأكيد مع الأزرار المضمنة (كما هو مطلوب)
     confirmation_markup = await get_confirmation_keyboard(reported_id)
     
     await update.message.reply_text(
@@ -497,4 +469,219 @@ async def handle_block_confirmation(update: Update, context: ContextTypes.DEFAUL
         partner_id = await end_chat_in_db(user_id)
         
         # 5. إرسال رسالة التأكيد للمستخدم (المُبلِّغ)
-complete
+        await query.edit_message_text(
+            "🛑 Thank you! The user has been blocked and the chat has ended.\n\n"
+            "Your report has been successfully sent for review.\n\n"
+            "Press Next 🎲 to find a new partner.",
+            reply_markup=None, # إزالة أزرار التأكيد
+            protect_content=True
+        )
+        
+        # 6. إخطار الشريك المُبلغ عنه (إذا أمكن)
+        if reported_id:
+            logger.info(f"Chat ended by {user_id} (via Block & Report). Partner was {reported_id}.")
+            try:
+                await context.bot.send_message(chat_id=reported_id, text="⚠️ Your partner has ended the chat.", reply_markup=main_keyboard, protect_content=True)
+            except (Forbidden, BadRequest) as e:
+                logger.warning(f"Could not notify partner {reported_id} about chat end: {e}")
+
+
+# --- (5) Broadcast Command (Updated for Media and English) ---
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    message = update.message
+    
+    # 1. التحقق من أن المستخدم هو الأدمن
+    if user_id != ADMIN_ID:
+        await message.reply_text("🚫 Access denied. This command is for the administrator only.", protect_content=True)
+        return
+
+    # 2. تحديد نوع الإرسال والتحقق من المحتوى
+    is_media_broadcast = message.photo or message.video or message.document
+    
+    if not is_media_broadcast and not context.args:
+        await message.reply_text(
+            "Usage:\n"
+            "1. For text: `/broadcast Your message here`\n"
+            "2. For media: Send the photo/video/document with `/broadcast` and your message in the caption.",
+            protect_content=True
+        )
+        return
+
+    # 3. جلب جميع المستخدمين من قاعدة البيانات
+    all_users = await get_all_users()
+    
+    if not all_users:
+        await message.reply_text("No users found in the database to broadcast to.", protect_content=True)
+        return
+
+    success_count = 0
+    fail_count = 0
+    
+    # 4. بدء عملية البث
+    await message.reply_text(f"Starting broadcast to {len(all_users)} users...", protect_content=True)
+    
+    for target_user_id in all_users:
+        try:
+            if is_media_broadcast:
+                # استخدام copy_message لإرسال الوسائط والتعليق بكفاءة
+                await context.bot.copy_message(
+                    chat_id=target_user_id,
+                    from_chat_id=user_id,
+                    message_id=message.message_id
+                )
+            else:
+                # إرسال نصي كالمعتاد
+                message_to_send = " ".join(context.args)
+                await context.bot.send_message(
+                    chat_id=target_user_id, 
+                    text=message_to_send, 
+                    parse_mode=constants.ParseMode.MARKDOWN,
+                    protect_content=True
+                ) 
+            
+            success_count += 1
+        except Forbidden:
+            fail_count += 1
+            logger.warning(f"User {target_user_id} blocked the bot. Skipping.")
+        except Exception as e:
+            fail_count += 1
+            logger.error(f"Failed to send broadcast to {target_user_id}: {e}")
+            
+    # 5. إرسال تقرير البث للأدمن
+    await message.reply_text(
+        f"✅ **Broadcast complete!**\n"
+        f"Sent successfully to: {success_count} users.\n"
+        f"Failed (Bot blocked/Error): {fail_count} users.",
+        protect_content=True
+    )
+
+
+# --- (6) Relay Message Handler (مع تفعيل فلاتر الروابط واليوزرات) ---
+
+async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sender_id = update.message.from_user.id
+    message = update.message
+    
+    await add_user_to_all_list(sender_id) 
+    
+    if not await is_user_subscribed(sender_id, context):
+        await send_join_channel_message(update, context)
+        return
+    
+    partner_id = await get_partner_from_db(sender_id)
+    
+    if not partner_id:
+        await message.reply_text("You are not in a chat. Press 'Search' to start.", reply_markup=main_keyboard, protect_content=True)
+        return
+
+    # --- Step 1: Log the message (الأرشفة أولاً - Log-Before-Filter) ---
+    if LOG_CHANNEL_ID:
+        try:
+            log_caption_md = f"Msg from: `{sender_id}`\nTo partner: `{partner_id}`\n\n{message.caption or ''}"
+            log_text = f"[Text Msg]\nMsg from: `{sender_id}`\nTo partner: `{partner_id}`\n\nContent: {message.text or ''}"
+            if message.photo: await context.bot.send_photo(chat_id=LOG_CHANNEL_ID, photo=message.photo[-1].file_id, caption=log_caption_md, parse_mode='Markdown')
+            elif message.document: await context.bot.send_document(chat_id=LOG_CHANNEL_ID, document=message.document.file_id, caption=log_caption_md, parse_mode='Markdown')
+            elif message.video: await context.bot.send_video(chat_id=LOG_CHANNEL_ID, video=message.video.file_id, caption=log_caption_md, parse_mode='Markdown')
+            elif message.voice: await context.bot.send_voice(chat_id=LOG_CHANNEL_ID, voice=message.voice.file_id, caption=log_caption_md, parse_mode='Markdown')
+            elif message.text: await context.bot.send_message(chat_id=LOG_CHANNEL_ID, text=log_text, parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"CRITICAL: Failed to log message to {LOG_CHANNEL_ID}: {e}")
+            
+    # --- Step 2: Filter/Block Links and Usernames ---
+    if message.text or message.caption:
+        text_to_check = message.text or message.caption
+
+        # 1. Link Filter (URL)
+        if URL_PATTERN.search(text_to_check):
+            await message.reply_text("⛔️ You cannot send links (URLs) in anonymous chat.", reply_markup=main_keyboard, protect_content=True)
+            return
+        
+        # 2. Username Filter (@)
+        if '@' in text_to_check:
+            await message.reply_text("⛔️ You cannot send user identifiers (usernames) in anonymous chat.", reply_markup=main_keyboard, protect_content=True)
+            return
+            
+    # --- Step 3: Relay the message (ترحيل محمي - تم التأكد من تفعيل الحماية) ---
+    try:
+        protect = True
+        
+        if message.photo: await context.bot.send_photo(chat_id=partner_id, photo=message.photo[-1].file_id, caption=message.caption, protect_content=protect)
+        elif message.document: await context.bot.send_document(chat_id=partner_id, document=message.document.file_id, caption=message.caption, protect_content=protect)
+        elif message.video: await context.bot.send_video(chat_id=partner_id, video=message.video.file_id, caption=message.caption, protect_content=protect)
+        elif message.sticker: await context.bot.send_sticker(chat_id=partner_id, sticker=message.sticker.file_id, protect_content=protect)
+        elif message.voice: await context.bot.send_voice(chat_id=partner_id, voice=message.voice.file_id, caption=message.caption, protect_content=protect)
+        elif message.text: 
+            await context.bot.send_message(chat_id=partner_id, text=message.text, protect_content=protect)
+        
+    except (Forbidden, BadRequest) as e:
+        if "bot was blocked" in str(e).lower() or "user is deactivated" in str(e).lower() or "chat not found" in str(e).lower():
+            logger.warning(f"Partner {partner_id} is unreachable. Ending chat initiated by {sender_id}.")
+            await end_chat_in_db(sender_id)
+            await message.reply_text("Your partner seems to have blocked the bot or left Telegram. The chat has ended.", reply_markup=main_keyboard, protect_content=True)
+        else:
+            logger.error(f"Failed to send to partner {partner_id}: {e}")
+            await message.reply_text("Sorry, your message failed to send. (Your partner might be temporarily unreachable).", protect_content=True)
+    except Exception as e:
+        logger.error(f"An unexpected error occurred sending from {sender_id} to {partner_id}: {e}")
+
+# --- Main Run Function ---
+
+async def post_database_init(application: Application):
+    if not await init_database():
+        raise RuntimeError("Database connection failed. Aborting startup.")
+    if not LOG_CHANNEL_ID:
+        logger.warning("WARNING: LOG_CHANNEL_ID not found. Logging/archiving is DISABLED.")
+    logger.info("Database connected. Bot is ready to start polling...")
+
+def main():
+    if not TELEGRAM_TOKEN:
+        logger.critical("CRITICAL: BOT_TOKEN not found.")
+        return
+    logger.info("Bot starting up...")
+    application = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .post_init(post_database_init)
+        .build()
+    )
+
+    # إضافة معالج زر التحقق من الاشتراك
+    application.add_handler(CallbackQueryHandler(handle_join_check, pattern="^check_join$"))
+    # إضافة معالج زر تأكيد الحظر
+    application.add_handler(CallbackQueryHandler(handle_block_confirmation, pattern="^confirm_block_|^cancel_block$"))
+    
+    # أمر البث (يجب أن يأتي قبل الأوامر الأخرى)
+    application.add_handler(CommandHandler("broadcast", broadcast_command))
+    # أمر الإرسال المباشر للأدمن
+    application.add_handler(CommandHandler("sendid", sendid_command)) 
+    # أمر الحظر الشامل
+    application.add_handler(CommandHandler("banuser", banuser_command))
+    
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("search", search_command))
+    application.add_handler(CommandHandler("end", end_command))
+    application.add_handler(CommandHandler("next", next_command))
+    
+    # معالجات الأزرار النصية 
+    application.add_handler(MessageHandler(filters.Text(["Search 🔎"]), search_command))
+    application.add_handler(MessageHandler(filters.Text(["Stop ⏹️"]), end_command))
+    
+    application.add_handler(MessageHandler(filters.Text(["Next 🎲"]), next_command))
+    application.add_handler(MessageHandler(filters.Text(["Block User 🚫"]), block_user_command)) 
+
+    
+    # المعالج الرئيسي للرسائل
+    button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲", "Block User 🚫"]
+    
+    application.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.Text(button_texts),
+        relay_and_log_message
+    ))
+
+    logger.info("Bot setup complete. Starting polling...")
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
