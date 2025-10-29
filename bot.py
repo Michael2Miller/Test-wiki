@@ -2,17 +2,22 @@ import os
 import asyncio
 import asyncpg
 import logging
-import re # <--- (تمت إعادة الإضافة)
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, constants
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telegram.error import BadRequest, Forbidden
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
-# --- Settings & Environment Variables (لا تغيير) ---
+# --- Settings & Environment Variables ---
 try:
+    # المتغيرات الأساسية للتشغيل
     TELEGRAM_TOKEN = os.environ['BOT_TOKEN']
     DATABASE_URL = os.environ['DATABASE_URL']
+    ADMIN_ID = int(os.environ['ADMIN_ID']) # <--- (جديد) جلب User ID الأدمن
+    
+    # متغيرات الاشتراك الإجباري
     CHANNEL_ID = os.environ['CHANNEL_ID']
     CHANNEL_INVITE_LINK = os.environ['CHANNEL_INVITE_LINK']
+    
+    # متغير اختياري
     LOG_CHANNEL_ID = os.environ.get('LOG_CHANNEL_ID') 
 except KeyError as e:
     logging.critical(f"CRITICAL: Missing environment variable {e}. Bot cannot start.")
@@ -34,18 +39,10 @@ keyboard_buttons = [
 main_keyboard = ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 button_texts = ["Search 🔎", "Next 🎲", "Report User 🚨", "Stop ⏹️"]
 
-# --- (NEW) URL Pattern Definition ---
-URL_PATTERN = re.compile(
-    r'(https?://|www\.|t\.me/|t\.co/|telegram\.me/|telegram\.dog/)' # Common prefixes
-    r'[\w\.-]+(\.[\w\.-]+)*([\w\-\._~:/\?#\[\]@!$&\'()*+,;=])*', # Domain and path
-    re.IGNORECASE
-)
-# --- End URL Pattern Definition ---
-
-
 # --- (1) Force Subscribe Helper Functions (لا تغيير) ---
 
 async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """تتحقق مما إذا كان المستخدم عضواً في القناة."""
     try:
         member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
         return member.status in ['member', 'administrator', 'creator']
@@ -60,6 +57,7 @@ async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
         return False
 
 async def send_join_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ترسل رسالة الاشتراك الإجباري."""
     keyboard = [
         [
             InlineKeyboardButton("🔗 Join Channel", url=CHANNEL_INVITE_LINK),
@@ -84,6 +82,7 @@ async def send_join_channel_message(update: Update, context: ContextTypes.DEFAUL
     )
 
 async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعالج ضغطة زر '✅ I have joined' للتحقق من الاشتراك."""
     query = update.callback_query
     user_id = query.from_user.id
     await query.answer("Checking your membership...")
@@ -99,9 +98,10 @@ async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.answer("Please subscribe to the channel first.", show_alert=True)
 
-# --- (2) Database Helper Functions (لا تغيير) ---
+# --- (2) Database Helper Functions (تم إضافة دالة get_all_users) ---
 
 async def init_database():
+    """يتصل بقاعدة البيانات وينشئ الجداول."""
     global db_pool
     if not DATABASE_URL:
         logger.critical("CRITICAL: DATABASE_URL not found. Bot cannot start.")
@@ -121,11 +121,36 @@ async def init_database():
                     timestamp TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC')
                 );
             ''')
+            # (جديد) جدول لتسجيل جميع المستخدمين الذين تفاعلوا مع البوت لغرض البث
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS all_users (
+                    user_id BIGINT PRIMARY KEY
+                );
+            ''')
         logger.info("Database connected and tables verified.")
         return True
     except Exception as e:
         logger.critical(f"CRITICAL: Failed to connect to database: {e}")
         return False
+
+async def add_user_to_all_list(user_id):
+    """يضيف المستخدم إلى قائمة البث إذا لم يكن موجوداً."""
+    if not db_pool: return
+    try:
+        async with db_pool.acquire() as connection:
+            await connection.execute(
+                "INSERT INTO all_users (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+                user_id
+            )
+    except Exception as e:
+        logger.error(f"Failed to add user {user_id} to broadcast list: {e}")
+
+async def get_all_users():
+    """(جديد) يجلب جميع المستخدمين المسجلين في قائمة البث."""
+    if not db_pool: return []
+    async with db_pool.acquire() as connection:
+        return await connection.fetchval("SELECT ARRAY_AGG(user_id) FROM all_users")
+
 
 async def get_partner_from_db(user_id):
     if not db_pool: return None
@@ -151,10 +176,14 @@ async def remove_from_wait_queue_db(user_id):
     async with db_pool.acquire() as connection:
         await connection.execute("DELETE FROM waiting_queue WHERE user_id = $1", user_id)
 
-# --- (3) Bot Command Handlers (لا تغيير في الدوال نفسها) ---
+# --- (3) Bot Command Handlers ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    
+    # (جديد) تسجيل المستخدم في قائمة البث عند الضغط على /start
+    await add_user_to_all_list(user_id)
+    
     if not await is_user_subscribed(user_id, context):
         await send_join_channel_message(update, context)
         return
@@ -169,6 +198,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔒 **Note:** All media in this chat is **protected**.",
             reply_markup=main_keyboard
         )
+
+# ... (بقية دوال الأوامر الأخرى تبقى كما هي) ...
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -311,17 +342,69 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (Forbidden, BadRequest) as e:
             logger.warning(f"Could not notify partner {partner_id} about chat end: {e}")
 
-# --- (5) Relay Message Handler (تم حذف الفلاتر) ---
+# --- (6) NEW Broadcast Command ---
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    
+    # 1. التحقق من أن المستخدم هو الأدمن
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("🚫 Access denied. This command is for the administrator only.")
+        return
+
+    # 2. التحقق من وجود رسالة للإرسال (Argument Check)
+    if not context.args:
+        await update.message.reply_text("Usage: /broadcast <your message here>")
+        return
+
+    message_to_send = " ".join(context.args)
+    
+    # 3. جلب جميع المستخدمين من قاعدة البيانات
+    all_users = await get_all_users()
+    
+    if not all_users:
+        await update.message.reply_text("No users found in the database to broadcast to.")
+        return
+
+    success_count = 0
+    fail_count = 0
+    
+    # 4. بدء عملية البث
+    await update.message.reply_text(f"Starting broadcast to {len(all_users)} users...")
+    
+    for target_user_id in all_users:
+        try:
+            # (نستخدم protect_content=False لأنها رسالة إعلان وليست محادثة مجهولة)
+            await context.bot.send_message(chat_id=target_user_id, text=message_to_send, parse_mode='Markdown')
+            success_count += 1
+        except Forbidden:
+            # (المستخدم قام بحظر البوت)
+            fail_count += 1
+            logger.warning(f"User {target_user_id} blocked the bot. Skipping.")
+        except Exception as e:
+            fail_count += 1
+            logger.error(f"Failed to send broadcast to {target_user_id}: {e}")
+            
+    # 5. إرسال تقرير البث للأدمن
+    await update.message.reply_text(
+        f"✅ **Broadcast complete!**\n"
+        f"Sent successfully to: {success_count} users.\n"
+        f"Failed (Bot blocked/Error): {fail_count} users."
+    )
+
+
+# --- (5) Relay Message Handler (لا تغيير في المنطق) ---
 
 async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.message.from_user.id
     message = update.message
     
+    # (جديد) إضافة المستخدم إلى قائمة البث عند التفاعل
+    await add_user_to_all_list(sender_id) 
+    
     if not await is_user_subscribed(sender_id, context):
         await send_join_channel_message(update, context)
         return
-    
-    # --- (لا يوجد فلتر للروابط/اليوزرنيم هنا) ---
     
     partner_id = await get_partner_from_db(sender_id)
     
@@ -342,7 +425,7 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             logger.error(f"CRITICAL: Failed to log message to {LOG_CHANNEL_ID}: {e}")
             
-    # --- Step 2: Relay the message (ترحيل محمي بدون زر إبلاغ) ---
+    # --- Step 2: Relay the message (ترحيل محمي) ---
     try:
         protect = True
         
@@ -388,6 +471,9 @@ def main():
     # إضافة معالج زر التحقق من الاشتراك
     application.add_handler(CallbackQueryHandler(handle_join_check, pattern="^check_join$"))
     
+    # (جديد) إضافة معالج أمر البث /broadcast
+    application.add_handler(CommandHandler("broadcast", broadcast_command))
+    
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("end", end_command))
@@ -398,7 +484,7 @@ def main():
     application.add_handler(MessageHandler(filters.Text(["Stop ⏹️"]), end_command))
     
     application.add_handler(MessageHandler(filters.Text(["Next 🎲"]), next_command))
-    application.add_handler(MessageHandler(filters.Text(["Report User 🚨"]), report_command)) # معالج التبليغ الجديد
+    application.add_handler(MessageHandler(filters.Text(["Report User 🚨"]), report_command))
     
     # المعالج الرئيسي للرسائل
     button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲", "Report User 🚨"]
