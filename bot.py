@@ -8,11 +8,16 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 
 # --- Settings ---
 try:
+    # المتغيرات الأساسية (ضرورية للتشغيل)
     TELEGRAM_TOKEN = os.environ['BOT_TOKEN']
     DATABASE_URL = os.environ['DATABASE_URL']
+    
+    # متغيرات الاشتراك الإجباري
     CHANNEL_ID = os.environ['CHANNEL_ID']
     CHANNEL_INVITE_LINK = os.environ['CHANNEL_INVITE_LINK']
-    LOG_CHANNEL_ID = os.environ.get('LOG_CHANNEL_ID')
+    
+    # متغير اختياري
+    LOG_CHANNEL_ID = os.environ.get('LOG_CHANNEL_ID') 
 except KeyError as e:
     logging.critical(f"FATAL ERROR: Environment variable {e} is not set.")
     exit(f"Missing environment variable: {e}")
@@ -35,9 +40,7 @@ main_keyboard = ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 # --- Force Subscribe Helper Functions ---
 
 async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """
-    تتحقق هذه الدالة مما إذا كان المستخدم عضواً في القناة.
-    """
+    """تتحقق مما إذا كان المستخدم عضواً في القناة."""
     try:
         member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
         return member.status in ['member', 'administrator', 'creator']
@@ -52,9 +55,7 @@ async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
         return False
 
 async def send_join_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    ترسل الرسالة التي تطلب من المستخدم الاشتراك + الأزرار المضمنة (Inline Keyboard).
-    """
+    """ترسل رسالة الاشتراك الإجباري."""
     keyboard = [
         [
             InlineKeyboardButton("🔗 Join Channel", url=CHANNEL_INVITE_LINK),
@@ -74,25 +75,20 @@ async def send_join_channel_message(update: Update, context: ContextTypes.DEFAUL
     )
 
 async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    يعالج ضغطة زر '✅ I have joined' للتحقق من الاشتراك.
-    """
+    """يعالج ضغطة زر '✅ I have joined'."""
     query = update.callback_query
     user_id = query.from_user.id
     await query.answer("Checking your membership...")
     
-    # --- التحقق من العضوية ---
     if await is_user_subscribed(user_id, context):
         await query.edit_message_text(
             r"🎉 **Thank you for joining\!**" + "\n\n"
             r"You can now use the bot\. Press /start or use the buttons below\.",
-            reply_markup=None, # إزالة الأزرار المضمنة
+            reply_markup=None, 
             parse_mode=constants.ParseMode.MARKDOWN_V2
         )
-        # (هام) إظهار لوحة المفاتيح الرئيسية
         await query.message.reply_text("Use the buttons below to control the chat:", reply_markup=main_keyboard)
     else:
-        # فشل التحقق
         await query.answer("Please subscribe to the channel first.", show_alert=True)
 
 # --- Database Helper Functions ---
@@ -180,7 +176,6 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     async with db_pool.acquire() as connection:
         async with connection.transaction():
-            # العثور على أقدم مستخدم في قائمة الانتظار ليس هو المستخدم الحالي
             partner_id = await connection.fetchval(
                 """
                 DELETE FROM waiting_queue
