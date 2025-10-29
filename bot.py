@@ -30,13 +30,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Define Keyboard Buttons (تم إضافة زر Report 🚩) ---
+# --- Define Keyboard Buttons (تم تعديل رمز التبليغ) ---
 keyboard_buttons = [
     ["Search 🔎", "Next 🎲"], 
-    ["Stop ⏹️", "Report 🚩"] # الزر الجديد هنا
+    ["Stop ⏹️", "Report User 🚨"] # <--- تم التعديل هنا
 ]
 main_keyboard = ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
-button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲", "Report 🚩"]
+button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲", "Report User 🚨"] # <--- تم التعديل هنا
 
 # --- (1) Force Subscribe Helper Functions ---
 
@@ -294,9 +294,9 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 3. إنهاء المحادثة لكلا الطرفين
     partner_id = await end_chat_in_db(user_id)
     
-    # 4. إرسال رسالة التأكيد للمستخدم (المُبلِّغ) - التعديل المطلوب
+    # 4. إرسال رسالة التأكيد للمستخدم (المُبلِّغ) - التعديل النهائي هنا
     await update.message.reply_text(
-        "🛑 Thank you! Your report has been successfully sent to the Telegram Team for review.\n\n"
+        "🚨 Thank you! Your report has been successfully sent to the Telegram Team for review.\n\n" # <--- تم تغيير الرمز هنا
         "You ended the chat with the reported user.\n\n"
         "Press Next 🎲 to find a new partner.",
         reply_markup=main_keyboard
@@ -398,10 +398,10 @@ def main():
     application.add_handler(MessageHandler(filters.Text(["Stop ⏹️"]), end_command))
     
     application.add_handler(MessageHandler(filters.Text(["Next 🎲"]), next_command))
-    application.add_handler(MessageHandler(filters.Text(["Report 🚩"]), report_command)) # معالج التبليغ الجديد
+    application.add_handler(MessageHandler(filters.Text(["Report User 🚨"]), report_command)) # معالج التبليغ الجديد
     
     # المعالج الرئيسي للرسائل
-    button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲", "Report 🚩"]
+    button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲", "Report User 🚨"]
     
     application.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.Text(button_texts),
