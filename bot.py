@@ -1,95 +1,146 @@
 import os
 import asyncio
 import asyncpg # (مكتبة قاعدة البيانات الجديدة)
-from telegram import Update, ReplyKeyboardMarkup
+import logging # (إضافة لتسجيل الدخول)
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, constants
 from telegram.error import BadRequest, Forbidden
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 # --- Settings ---
-TELEGRAM_TOKEN = os.environ.get('BOT_TOKEN')
-LOG_CHANNEL_ID = os.environ.get('LOG_CHANNEL_ID')
-DATABASE_URL = os.environ.get('DATABASE_URL') # (جلب رابط قاعدة البيانات)
+try:
+    TELEGRAM_TOKEN = os.environ['BOT_TOKEN']
+    DATABASE_URL = os.environ['DATABASE_URL']
+    CHANNEL_ID = os.environ['CHANNEL_ID']
+    CHANNEL_INVITE_LINK = os.environ['CHANNEL_INVITE_LINK']
+    LOG_CHANNEL_ID = os.environ.get('LOG_CHANNEL_ID')
+except KeyError as e:
+    logging.critical(f"FATAL ERROR: Environment variable {e} is not set.")
+    exit(f"Missing environment variable: {e}")
 
-# (هام) هذا المتغير سيحمل الاتصال الدائم بقاعدة البيانات
 db_pool = None
 
-# --- (NEW) Define Keyboard Buttons ---
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# --- Define Keyboard Buttons ---
+# --- (التعديل الأول: إضافة النرد هنا) ---
 keyboard_buttons = [
-    ["Search 🔎", "Next ↪️"],
+    ["Search 🔎", "Next 🎲"], # <--- تم التعديل هنا
     ["Stop ⏹️"]
 ]
+# ------------------------------------
 main_keyboard = ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 
+# --- Force Subscribe Helper Functions ---
 
-# --- (NEW) Database Helper Functions ---
+async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    try:
+        member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except BadRequest as e:
+        if "user not found" in e.message:
+            logger.warning(f"User {user_id} not found in channel {CHANNEL_ID}, likely not joined.")
+        else:
+            logger.error(f"Error checking channel membership for {user_id} in {CHANNEL_ID}: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error checking membership for {user_id} in {CHANNEL_ID}: {e}")
+        return False
+
+async def send_join_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [
+            InlineKeyboardButton("🔗 Join Channel", url=CHANNEL_INVITE_LINK),
+            InlineKeyboardButton("✅ I have joined", callback_data="check_join")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    sender = update.message.reply_text if update.message else update.callback_query.message.reply_text
+    await sender(
+        r"👋 **Welcome to Random Partner 🎲\!**" + "\n\n"
+        r"To use this bot, you are required to join our official channel\." + "\n\n"
+        r"Please join the channel using the button below, then press '✅ I have joined'\.",
+        reply_markup=reply_markup,
+        parse_mode=constants.ParseMode.MARKDOWN_V2
+    )
+
+async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer("Checking your membership...")
+    if await is_user_subscribed(user_id, context):
+        await query.edit_message_text(
+            r"🎉 **Thank you for joining\!**" + "\n\n"
+            r"You can now use the bot\. Press /start or use the buttons below\.",
+            reply_markup=None,
+            parse_mode=constants.ParseMode.MARKDOWN_V2
+        )
+        await query.message.reply_text("Use the buttons below to control the chat:", reply_markup=main_keyboard)
+    else:
+        await query.answer("Please subscribe to the channel first.", show_alert=True)
+
+# --- Database Helper Functions ---
 
 async def init_database():
-    """يتصل بقاعدة البيانات وينشئ الجداول إذا لم تكن موجودة."""
     global db_pool
     if not DATABASE_URL:
-        print("CRITICAL: DATABASE_URL not found. Bot cannot start.")
+        logger.critical("CRITICAL: DATABASE_URL not found. Bot cannot start.")
         return False
-        
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL)
-        # إنشاء الجداول الدائمة
         async with db_pool.acquire() as connection:
-            # 1. جدول لتخزين المحادثات النشطة
             await connection.execute('''
                 CREATE TABLE IF NOT EXISTS active_chats (
                     user_id BIGINT PRIMARY KEY,
                     partner_id BIGINT NOT NULL UNIQUE
                 );
             ''')
-            # 2. جدول لتخزين قائمة الانتظار
             await connection.execute('''
                 CREATE TABLE IF NOT EXISTS waiting_queue (
                     user_id BIGINT PRIMARY KEY,
                     timestamp TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC')
                 );
             ''')
-        print("Database connected and tables verified.")
+        logger.info("Database connected and tables verified.")
         return True
     except Exception as e:
-        print(f"CRITICAL: Failed to connect to database: {e}")
+        logger.critical(f"CRITICAL: Failed to connect to database: {e}")
         return False
 
 async def get_partner_from_db(user_id):
-    """(جديد) يتحقق مما إذا كان المستخدم في محادثة نشطة ويعيد الشريك."""
     if not db_pool: return None
     async with db_pool.acquire() as connection:
         return await connection.fetchval("SELECT partner_id FROM active_chats WHERE user_id = $1", user_id)
 
 async def is_user_waiting_db(user_id):
-    """(جديد) يتحقق مما إذا كان المستخدم في قائمة الانتظار."""
     if not db_pool: return False
     async with db_pool.acquire() as connection:
         return await connection.fetchval("SELECT 1 FROM waiting_queue WHERE user_id = $1", user_id) is not None
 
 async def end_chat_in_db(user_id):
-    """(جديد) ينهي المحادثة في قاعدة البيانات ويعيد الشريك."""
     if not db_pool: return None
     async with db_pool.acquire() as connection:
-        async with connection.transaction(): # (نستخدم معاملة لضمان الحذف)
-            # 1. احذف المستخدم وأعد شريكه
+        async with connection.transaction():
             partner_id = await connection.fetchval("DELETE FROM active_chats WHERE user_id = $1 RETURNING partner_id", user_id)
             if partner_id:
-                # 2. احذف الشريك أيضاً
                 await connection.execute("DELETE FROM active_chats WHERE user_id = $1", partner_id)
             return partner_id
 
 async def remove_from_wait_queue_db(user_id):
-    """(جديد) يزيل المستخدم من قائمة الانتظار."""
     if not db_pool: return
     async with db_pool.acquire() as connection:
         await connection.execute("DELETE FROM waiting_queue WHERE user_id = $1", user_id)
 
-
-# --- Bot Command Handlers (Modified for DB) ---
+# --- Bot Command Handlers ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    
+    if not await is_user_subscribed(user_id, context):
+        await send_join_channel_message(update, context)
+        return
     if await get_partner_from_db(user_id):
         await update.message.reply_text("You are currently in a chat. Use the buttons below.", reply_markup=main_keyboard)
     elif await is_user_waiting_db(user_id):
@@ -104,241 +155,19 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    
+    if not await is_user_subscribed(user_id, context):
+        await send_join_channel_message(update, context)
+        return
     if await get_partner_from_db(user_id):
         await update.message.reply_text("You are already in a chat! Press 'Stop' or 'Next' first.")
         return
     if await is_user_waiting_db(user_id):
         await update.message.reply_text("You are already searching. Please wait...")
         return
-
-    # --- (MODIFIED) DB Logic ---
     async with db_pool.acquire() as connection:
-        async with connection.transaction(): # (نستخدم معاملة لضمان المطابقة)
-            
-            # --- (!!!) START OF FIX (!!!) ---
-            # (السطر القديم المسبب للمشكلة تم استبداله بهذا)
+        async with connection.transaction():
             partner_id = await connection.fetchval(
                 """
                 DELETE FROM waiting_queue
-                WHERE user_id = (
-                    SELECT user_id
-                    FROM waiting_queue
-                    ORDER BY timestamp ASC
-                    LIMIT 1
-                )
+                WHERE user_id = (SELECT user_id FROM waiting_queue ORDER BY timestamp ASC LIMIT 1)
                 RETURNING user_id
-                """
-            )
-            # --- (!!!) END OF FIX (!!!) ---
-            
-            if partner_id:
-                # 2. وجدنا شريكاً! قم بتسجيل المحادثة
-                await connection.execute(
-                    "INSERT INTO active_chats (user_id, partner_id) VALUES ($1, $2), ($2, $1)",
-                    user_id, partner_id
-                )
-                print(f"Match found! {user_id} <-> {partner_id}.")
-                
-                # 3. إبلاغ الطرفين
-                await context.bot.send_message(chat_id=user_id, text="✅ Partner found! The chat has started. (You are anonymous).")
-                await context.bot.send_message(chat_id=partner_id, text="✅ Partner found! The chat has started. (You are anonymous).", reply_markup=main_keyboard)
-            else:
-                # 4. لا أحد ينتظر، أضف هذا المستخدم إلى الانتظار
-                await connection.execute("INSERT INTO waiting_queue (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
-                await update.message.reply_text("🔎 Searching for a partner... Please wait.")
-                print(f"User {user_id} added to DB queue.")
-
-async def end_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    
-    # --- (MODIFIED) DB Logic ---
-    partner_id = await end_chat_in_db(user_id)
-    
-    if partner_id:
-        # كان في محادثة
-        print(f"Chat ended by {user_id}. Partner was {partner_id}.")
-        await context.bot.send_message(chat_id=user_id, text="🔚 You have ended the chat.", reply_markup=main_keyboard)
-        await context.bot.send_message(chat_id=partner_id, text="⚠️ Your partner has left the chat.", reply_markup=main_keyboard)
-    elif await is_user_waiting_db(user_id):
-        # كان في الانتظار
-        await remove_from_wait_queue_db(user_id)
-        print(f"User {user_id} cancelled search.")
-        await update.message.reply_text("Search cancelled.", reply_markup=main_keyboard)
-    else:
-        await update.message.reply_text("You are not currently in a chat or searching.", reply_markup=main_keyboard)
-
-async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    
-    # --- 1. (MODIFIED) End Chat Logic ---
-    partner_id = await end_chat_in_db(user_id)
-    
-    if partner_id:
-        print(f"Chat ended by {user_id} (via /next). Partner was {partner_id}.")
-        await context.bot.send_message(chat_id=user_id, text="🔚 Chat ended. Searching for new partner...")
-        await context.bot.send_message(chat_id=partner_id, text="⚠️ Your partner has left the chat.", reply_markup=main_keyboard)
-    elif await is_user_waiting_db(user_id):
-        await update.message.reply_text("You are already searching. Please wait...")
-        return
-    else:
-        await update.message.reply_text("🔎 Searching for a partner... Please wait.")
-
-    # --- 2. (MODIFIED) Search Logic ---
-    async with db_pool.acquire() as connection:
-        async with connection.transaction():
-            
-            # --- (!!!) START OF FIX (!!!) ---
-            # (تم إصلاح نفس الخطأ هنا أيضاً)
-            partner_id_new = await connection.fetchval(
-                """
-                DELETE FROM waiting_queue
-                WHERE user_id = (
-                    SELECT user_id
-                    FROM waiting_queue
-                    ORDER BY timestamp ASC
-                    LIMIT 1
-                )
-                RETURNING user_id
-                """
-            )
-            # --- (!!!) END OF FIX (!!!) ---
-
-            if partner_id_new:
-                await connection.execute(
-                    "INSERT INTO active_chats (user_id, partner_id) VALUES ($1, $2), ($2, $1)",
-                    user_id, partner_id_new
-                )
-                print(f"Match found! {user_id} <-> {partner_id_new}.")
-                await context.bot.send_message(chat_id=user_id, text="✅ Partner found! The chat has started.")
-                await context.bot.send_message(chat_id=partner_id_new, text="✅ Partner found! The chat has started.", reply_markup=main_keyboard)
-            else:
-                await connection.execute("INSERT INTO waiting_queue (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
-                print(f"User {user_id} added to DB queue (via /next).")
-
-
-async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sender_id = update.message.from_user.id
-    message = update.message
-
-    # --- (MODIFIED) DB Check ---
-    partner_id = await get_partner_from_db(sender_id)
-    
-    if not partner_id:
-        await message.reply_text("You are not in a chat. Press 'Search' to start.", reply_markup=main_keyboard)
-        return
-
-    # --- Step 1: Log the message (Unprotected) ---
-    if LOG_CHANNEL_ID:
-        try:
-            log_caption = (f"Message from: `{sender_id}`\nTo partner: `{partner_id}`\n\n{message.caption or ''}")
-            
-            if message.photo:
-                await context.bot.send_photo(chat_id=LOG_CHANNEL_ID, photo=message.photo[-1].file_id, caption=log_caption, parse_mode='Markdown')
-            elif message.document:
-                await context.bot.send_document(chat_id=LOG_CHANNEL_ID, document=message.document.file_id, caption=log_caption, parse_mode='Markdown')
-            elif message.video:
-                await context.bot.send_video(chat_id=LOG_CHANNEL_ID, video=message.video.file_id, caption=log_caption, parse_mode='Markdown')
-            elif message.voice:
-                 await context.bot.send_voice(chat_id=LOG_CHANNEL_ID, voice=message.voice.file_id, caption=log_caption, parse_mode='Markdown')
-            elif message.text:
-                 await context.bot.send_message(chat_id=LOG_CHANNEL_ID, text=f"[Text Message]\n{log_caption}\n\nContent: {message.text}", parse_mode='Markdown')
-            
-            print(f"Logged message from {sender_id} to {partner_id}")
-        except Exception as e:
-            print(f"CRITICAL: Failed to log message to {LOG_CHANNEL_ID}: {e}")
-    
-    # --- Step 2: Relay the message (Protected) ---
-    try:
-        #
-        # # --- (!!!) ADMIN TOGGLE: CONTENT PROTECTION (!!!) ---
-        #   To DISABLE protection: Change 'protect_content=True' to 'protect_content=False'
-        #   To ENABLE protection: Change 'protect_content=False' to 'protect_content=True'
-        #
-        
-        if message.photo:
-            await context.bot.send_photo(chat_id=partner_id, photo=message.photo[-1].file_id, caption=message.caption, protect_content=True)
-        elif message.document:
-            await context.bot.send_document(chat_id=partner_id, document=message.document.file_id, caption=message.caption, protect_content=True)
-        elif message.video:
-            await context.bot.send_video(chat_id=partner_id, video=message.video.file_id, caption=message.caption, protect_content=True)
-        elif message.sticker:
-            await context.bot.send_sticker(chat_id=partner_id, sticker=message.sticker.file_id, protect_content=True)
-        elif message.voice:
-            await context.bot.send_voice(chat_id=partner_id, voice=message.voice.file_id, caption=message.caption, protect_content=True)
-        elif message.text:
-            await context.bot.send_message(chat_id=partner_id, text=message.text, protect_content=True)
-
-    except (Forbidden, BadRequest) as e:
-        if "bot was blocked" in str(e) or "user is deactivated" in str(e) or "chat not found" in str(e):
-            print(f"Partner {partner_id} is unreachable. Ending chat.")
-            # (هام) يجب أن نزيلهم من قاعدة البيانات
-            await end_chat_in_db(sender_id) # سينهي المحادثة لكلا الطرفين
-            await message.reply_text("Your partner seems to have blocked the bot. The chat has ended.", reply_markup=main_keyboard)
-        else:
-            print(f"Failed to send to partner {partner_id}: {e}")
-            await message.reply_text("Sorry, your message failed to send. (Your partner may have blocked the bot).")
-    except Exception as e:
-        print(f"An unexpected error occurred sending to {partner_id}: {e}")
-
-# --- (MODIFIED) Main Run Function (The Fix) ---
-
-async def post_database_init(application: Application):
-    """
-    (جديد) دالة تعمل بعد تهيئة البوت وقبل بدء التشغيل.
-    نتصل بقاعدة البيانات هنا.
-    """
-    if not await init_database():
-        # إذا فشل الاتصال بقاعدة البيانات، نمنع البوت من البدء
-        raise RuntimeError("Database connection failed. Aborting startup.")
-    
-    if not LOG_CHANNEL_ID:
-        print("WARNING: LOG_CHANNEL_ID not found. Bot will work, but logging/archiving is DISABLED.")
-    
-    print("Database connected. Bot is ready to start polling...")
-
-
-def main():
-    """الدالة الرئيسية لتشغيل البوت"""
-    if not TELEGRAM_TOKEN:
-        print("CRITICAL: BOT_TOKEN not found.")
-        return
-
-    print("Bot starting up...")
-
-    # (جديد) بناء التطبيق مع خطاف post_init
-    # هذا هو الحل الاحترافي للمشكلة
-    application = (
-        Application.builder()
-        .token(TELEGRAM_TOKEN)
-        .post_init(post_database_init)  # <-- سيقوم بتشغيل دالة الاتصال بقاعدة البيانات في الوقت المناسب
-        .build()
-    )
-
-    # --- إضافة جميع المعالجات (Handlers) ---
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("search", search_command))
-    application.add_handler(CommandHandler("end", end_command))
-    application.add_handler(CommandHandler("next", next_command))
-
-    # معالجات الأزرار
-    application.add_handler(MessageHandler(filters.Text(["Search 🔎"]), search_command))
-    application.add_handler(MessageHandler(filters.Text(["Stop ⏹️"]), end_command))
-    application.add_handler(MessageHandler(filters.Text(["Next ↪️"]), next_command))
-    
-    # المعالج الرئيسي للرسائل (يجب أن يكون الأخير)
-    button_texts = ["Search 🔎", "Stop ⏹️", "Next ↪️"]
-    application.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.Text(button_texts), 
-        relay_and_log_message
-    ))
-    # --- نهاية إضافة المعالجات ---
-
-    # (جديد) تشغيل البوت
-    # هذه الدالة الآن تدير كل شيء بنفسها، بما في ذلك asyncio
-    print("Bot setup complete. Starting polling...")
-    application.run_polling()
-
-
-if __name__ == "__main__":
-    main()
