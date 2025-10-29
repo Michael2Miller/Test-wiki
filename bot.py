@@ -5,6 +5,7 @@ import logging
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, constants
 from telegram.error import BadRequest, Forbidden
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+import re
 
 # --- Settings & Environment Variables ---
 try:
@@ -26,13 +27,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Define Keyboard Buttons (الترتيب النهائي) ---
+# --- Define Keyboard Buttons ---
 keyboard_buttons = [
     ["Search 🔎", "Next 🎲"], 
     ["Block User 🚫", "Stop ⏹️"] 
 ]
 main_keyboard = ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 button_texts = ["Search 🔎", "Next 🎲", "Block User 🚫", "Stop ⏹️"]
+
+# --- NEW: URL and Username Pattern Definition ---
+URL_PATTERN = re.compile(
+    r'(https?://|www\.|t\.me/|t\.co/|telegram\.me/|telegram\.dog/)'
+    r'[\w\.-]+(\.[\w\.-]+)*([\w\-\._~:/\?#\[\]@!$&\'()*+,;=])*',
+    re.IGNORECASE
+)
 
 # --- Define Confirmation Keyboard ---
 async def get_confirmation_keyboard(reported_id):
@@ -42,67 +50,7 @@ async def get_confirmation_keyboard(reported_id):
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# --- (1) Force Subscribe Helper Functions ---
-
-async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """تتحقق مما إذا كان المستخدم عضواً في القناة."""
-    try:
-        member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        return member.status in ['member', 'administrator', 'creator']
-    except BadRequest as e:
-        if "user not found" in e.message:
-            logger.warning(f"User {user_id} not found in channel {CHANNEL_ID}, likely not joined.")
-        else:
-            logger.error(f"Error checking channel membership for {user_id} in {CHANNEL_ID}: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Unexpected error checking membership for {user_id} in {CHANNEL_ID}: {e}")
-        return False
-
-async def send_join_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ترسل رسالة الاشتراك الإجباري."""
-    keyboard = [
-        [
-            InlineKeyboardButton("🔗 Join Channel", url=CHANNEL_INVITE_LINK),
-            InlineKeyboardButton("✅ I have joined", callback_data="check_join")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.message:
-        sender = update.message.reply_text
-    elif update.callback_query:
-        sender = update.callback_query.message.reply_text
-    else:
-        return
-        
-    await sender(
-        r"👋 **Welcome to Random Partner 🎲\!**" + "\n\n"
-        r"To use this bot, you are required to join our official channel\." + "\n\n"
-        r"Please join the channel using the button below, then press '✅ I have joined'\.",
-        reply_markup=reply_markup,
-        parse_mode=constants.ParseMode.MARKDOWN_V2,
-        protect_content=True
-    )
-
-async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يعالج ضغطة زر '✅ I have joined' للتحقق من الاشتراك."""
-    query = update.callback_query
-    user_id = query.from_user.id
-    await query.answer("Checking your membership...")
-    
-    if await is_user_subscribed(user_id, context):
-        await query.edit_message_text(
-            r"🎉 **Thank you for joining\!**" + "\n\n"
-            r"You can now use the bot\. Press /start or use the buttons below\.",
-            reply_markup=None, 
-            parse_mode=constants.ParseMode.MARKDOWN_V2
-        )
-        await query.message.reply_text("Use the buttons below to control the chat:", reply_markup=main_keyboard, protect_content=True)
-    else:
-        await query.answer("Please subscribe to the channel first.", show_alert=True)
-
-# --- (2) Database Helper Functions ---
+# --- (1) Database Helper Functions ---
 
 async def is_user_globally_banned(user_id):
     """(جديد) يتحقق مما إذا كان المستخدم محظوراً بشكل شامل."""
@@ -143,7 +91,6 @@ async def init_database():
                     PRIMARY KEY (blocker_id, blocked_id)
                 );
             ''')
-            # --- (جدول الحظر الشامل الجديد) ---
             await connection.execute('''
                 CREATE TABLE IF NOT EXISTS global_bans (
                     user_id BIGINT PRIMARY KEY
@@ -207,12 +154,179 @@ async def add_user_block(blocker_id, blocked_id):
             blocker_id, blocked_id
         )
 
-# --- (3) Bot Command Handlers ---
+# --- (2) Global Helper Functions (Subscribe, Join Check) ---
+
+async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """تتحقق مما إذا كان المستخدم عضواً في القناة."""
+    try:
+        member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except BadRequest as e:
+        if "user not found" in e.message:
+            logger.warning(f"User {user_id} not found in channel {CHANNEL_ID}, likely not joined.")
+        else:
+            logger.error(f"Error checking channel membership for {user_id} in {CHANNEL_ID}: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error checking membership for {user_id} in {CHANNEL_ID}: {e}")
+        return False
+
+async def send_join_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ترسل رسالة الاشتراك الإجباري."""
+    keyboard = [
+        [
+            InlineKeyboardButton("🔗 Join Channel", url=CHANNEL_INVITE_LINK),
+            InlineKeyboardButton("✅ I have joined", callback_data="check_join")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    if update.message:
+        sender = update.message.reply_text
+    elif update.callback_query:
+        sender = update.callback_query.message.reply_text
+    else:
+        return
+        
+    await sender(
+        r"👋 **Welcome to Random Partner 🎲\!**" + "\n\n"
+        r"To use this bot, you are required to join our official channel\." + "\n\n"
+        r"Please join the channel using the button below, then press '✅ I have joined'\.",
+        reply_markup=reply_markup,
+        parse_mode=constants.ParseMode.MARKDOWN_V2,
+        protect_content=True
+    )
+
+async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعالج ضغطة زر '✅ I have joined' للتحقق من الاشتراك."""
+    query = update.callback_query
+    user_id = query.from_user.id
+    await query.answer("Checking your membership...")
+    
+    if await is_user_subscribed(user_id, context):
+        await query.edit_message_text(
+            r"🎉 **Thank you for joining\!**" + "\n\n"
+            r"You can now use the bot\. Press /start or use the buttons below\.",
+            reply_markup=None, 
+            parse_mode=constants.ParseMode.MARKDOWN_V2
+        )
+        await query.message.reply_text("Use the buttons below to control the chat:", reply_markup=main_keyboard, protect_content=True)
+    else:
+        await query.answer("Please subscribe to the channel first.", show_alert=True)
+
+# --- (3) Admin Global Ban Commands ---
+
+async def banuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    
+    # 1. التحقق من أن المستخدم هو الأدمن
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("🚫 Access denied. Admin command only.", protect_content=True)
+        return
+
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /banuser <User_ID_to_Ban>", protect_content=True)
+        return
+
+    try:
+        banned_id = int(context.args[0])
+        
+        # 2. تسجيل الحظر في جدول global_bans
+        async with db_pool.acquire() as connection:
+            await connection.execute(
+                "INSERT INTO global_bans (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+                banned_id
+            )
+        
+        # 3. إخراج المستخدم من أي محادثة حالية أو قائمة انتظار (للتنظيف)
+        await end_chat_in_db(banned_id)
+        await remove_from_wait_queue_db(banned_id)
+        
+        # 4. إخطار الأدمن
+        await update.message.reply_text(f"✅ User ID {banned_id} has been permanently blocked from using the chat features.", protect_content=True)
+        
+    except ValueError:
+        await update.message.reply_text("❌ Invalid ID format. Must be a number.", protect_content=True)
+    except Exception as e:
+        logger.error(f"Error banning user: {e}")
+        await update.message.reply_text(f"❌ An error occurred during the ban process: {e}", protect_content=True)
+
+# --- (4) Broadcast Command ---
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    message = update.message
+    
+    # 1. التحقق من أن المستخدم هو الأدمن
+    if user_id != ADMIN_ID:
+        await message.reply_text("🚫 Access denied. This command is for the administrator only.", protect_content=True)
+        return
+
+    # 2. تحديد نوع الإرسال والتحقق من المحتوى
+    is_media_broadcast = message.photo or message.video or message.document
+    
+    if not is_media_broadcast and not context.args:
+        await message.reply_text(
+            "Usage:\n"
+            "1. For text: `/broadcast Your message here`\n"
+            "2. For media: Send the photo/video/document with `/broadcast` and your message in the caption.",
+            protect_content=True
+        )
+        return
+
+    # 3. جلب جميع المستخدمين من قاعدة البيانات
+    all_users = await get_all_users()
+    
+    if not all_users:
+        await message.reply_text("No users found in the database to broadcast to.", protect_content=True)
+        return
+
+    success_count = 0
+    fail_count = 0
+    
+    # 4. بدء عملية البث
+    await message.reply_text(f"Starting broadcast to {len(all_users)} users...", protect_content=True)
+    
+    for target_user_id in all_users:
+        try:
+            if is_media_broadcast:
+                # استخدام copy_message لإرسال الوسائط والتعليق بكفاءة
+                await context.bot.copy_message(
+                    chat_id=target_user_id,
+                    from_chat_id=user_id,
+                    message_id=message.message_id
+                )
+            else:
+                # إرسال نصي كالمعتاد
+                message_to_send = " ".join(context.args)
+                await context.bot.send_message(
+                    chat_id=target_user_id, 
+                    text=message_to_send, 
+                    parse_mode=constants.ParseMode.MARKDOWN,
+                    protect_content=True
+                ) 
+            
+            success_count += 1
+        except Forbidden:
+            fail_count += 1
+            logger.warning(f"User {target_user_id} blocked the bot. Skipping.")
+        except Exception as e:
+            fail_count += 1
+            logger.error(f"Failed to send broadcast to {target_user_id}: {e}")
+            
+    # 5. إرسال تقرير البث للأدمن
+    await message.reply_text(
+        f"✅ **Broadcast complete!**\n"
+        f"Sent successfully to: {success_count} users.\n"
+        f"Failed (Bot blocked/Error): {fail_count} users.",
+        protect_content=True
+    )
+
+# --- (5) Bot Command Handlers (Includes Global Ban Filter) ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     
-    # 🛑 (التحقق من الحظر الشامل) 🛑
     if await is_user_globally_banned(user_id):
         await update.message.reply_text("🚫 Your access to this bot has been permanently suspended.", protect_content=True)
         return
@@ -237,7 +351,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    # 🛑 (التحقق من الحظر الشامل) 🛑
+    
     if await is_user_globally_banned(user_id):
         await update.message.reply_text("🚫 Your access to this bot has been permanently suspended.", protect_content=True)
         return
@@ -285,7 +399,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def end_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    # 🛑 (التحقق من الحظر الشامل) 🛑
+    
     if await is_user_globally_banned(user_id):
         await update.message.reply_text("🚫 Your access to this bot has been permanently suspended.", protect_content=True)
         return
@@ -310,7 +424,7 @@ async def end_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    # 🛑 (التحقق من الحظر الشامل) 🛑
+    
     if await is_user_globally_banned(user_id):
         await update.message.reply_text("🚫 Your access to this bot has been permanently suspended.", protect_content=True)
         return
@@ -398,12 +512,11 @@ async def banuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error banning user: {e}")
         await update.message.reply_text(f"❌ An error occurred during the ban process: {e}", protect_content=True)
 
-# --- (4) Report Command Handler (لا تغيير) ---
+# --- (4) Report Command Handler ---
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     
-    # 🛑 (التحقق من الحظر الشامل) 🛑
     if await is_user_globally_banned(user_id):
         await update.message.reply_text("🚫 Your access to this bot has been permanently suspended.", protect_content=True)
         return
@@ -421,7 +534,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("You are not currently in a chat to block anyone.", reply_markup=main_keyboard, protect_content=True)
         return
     
-    # 2. إرسال رسالة التأكيد مع الأزرار المضمنة (كما هو مطلوب)
+    # 1. إرسال رسالة التأكيد مع الأزرار المضمنة (كما هو مطلوب)
     confirmation_markup = await get_confirmation_keyboard(reported_id)
     
     await update.message.reply_text(
@@ -564,6 +677,11 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
     sender_id = update.message.from_user.id
     message = update.message
     
+    # 🛑 (التحقق من الحظر الشامل) 🛑
+    if await is_user_globally_banned(sender_id):
+        await update.message.reply_text("🚫 Your access to this bot has been permanently suspended.", protect_content=True)
+        return
+    
     await add_user_to_all_list(sender_id) 
     
     if not await is_user_subscribed(sender_id, context):
@@ -652,11 +770,9 @@ def main():
     # إضافة معالج زر تأكيد الحظر
     application.add_handler(CallbackQueryHandler(handle_block_confirmation, pattern="^confirm_block_|^cancel_block$"))
     
-    # أمر البث (يجب أن يأتي قبل الأوامر الأخرى)
+    # أوامر الأدمن
     application.add_handler(CommandHandler("broadcast", broadcast_command))
-    # أمر الإرسال المباشر للأدمن
     application.add_handler(CommandHandler("sendid", sendid_command)) 
-    # أمر الحظر الشامل
     application.add_handler(CommandHandler("banuser", banuser_command))
     
     application.add_handler(CommandHandler("start", start_command))
@@ -664,7 +780,7 @@ def main():
     application.add_handler(CommandHandler("end", end_command))
     application.add_handler(CommandHandler("next", next_command))
     
-    # معالجات الأزرار النصية 
+    # معالجات الأزرار النصية
     application.add_handler(MessageHandler(filters.Text(["Search 🔎"]), search_command))
     application.add_handler(MessageHandler(filters.Text(["Stop ⏹️"]), end_command))
     
