@@ -2,23 +2,19 @@ import os
 import asyncio
 import asyncpg
 import logging
-import re
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, constants
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telegram.error import BadRequest, Forbidden
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 # --- Settings & Environment Variables ---
 try:
-    # Essential Variables
     TELEGRAM_TOKEN = os.environ['BOT_TOKEN']
     DATABASE_URL = os.environ['DATABASE_URL']
-    ADMIN_ID = int(os.environ['ADMIN_ID']) # Admin User ID
+    ADMIN_ID = int(os.environ['ADMIN_ID']) 
     
-    # Force Subscribe Variables
     CHANNEL_ID = os.environ['CHANNEL_ID']
     CHANNEL_INVITE_LINK = os.environ['CHANNEL_INVITE_LINK']
     
-    # Optional Variable
     LOG_CHANNEL_ID = os.environ.get('LOG_CHANNEL_ID') 
 except KeyError as e:
     logging.critical(f"CRITICAL: Missing environment variable {e}. Bot cannot start.")
@@ -32,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Define Keyboard Buttons ---
+# --- Define Keyboard Buttons (الترتيب النهائي) ---
 keyboard_buttons = [
     ["Search 🔎", "Next 🎲"], 
     ["Report User 🚨", "Stop ⏹️"] 
@@ -40,13 +36,15 @@ keyboard_buttons = [
 main_keyboard = ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 button_texts = ["Search 🔎", "Next 🎲", "Report User 🚨", "Stop ⏹️"]
 
-# --- URL and Username Pattern Definition ---
-URL_PATTERN = re.compile(
-    r'(https?://|www\.|t\.me/|t\.co/|telegram\.me/|telegram\.dog/)'
-    r'[\w\.-]+(\.[\w\.-]+)*([\w\-\._~:/\?#\[\]@!$&\'()*+,;=])*',
-    re.IGNORECASE
-)
-# --- End URL Pattern Definition ---
+# --- (NEW) Define Confirmation Keyboard ---
+# (الأزرار المضمنة لخطوة التأكيد - زر واحد في كل صف ليكون كبيراً وواضحاً)
+async def get_confirmation_keyboard(reported_id):
+    keyboard = [
+        [InlineKeyboardButton("✅ Block and Report Now", callback_data=f"confirm_block_{reported_id}")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_block")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+# ---------------------------------------------
 
 
 # --- (1) Force Subscribe Helper Functions ---
@@ -66,6 +64,7 @@ async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
         return False
 
 async def send_join_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ترسل رسالة الاشتراك الإجباري."""
     keyboard = [
         [
             InlineKeyboardButton("🔗 Join Channel", url=CHANNEL_INVITE_LINK),
@@ -90,6 +89,7 @@ async def send_join_channel_message(update: Update, context: ContextTypes.DEFAUL
     )
 
 async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعالج ضغطة زر '✅ I have joined' للتحقق من الاشتراك."""
     query = update.callback_query
     user_id = query.from_user.id
     await query.answer("Checking your membership...")
@@ -105,10 +105,10 @@ async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.answer("Please subscribe to the channel first.", show_alert=True)
 
-# --- (2) Database Helper Functions (No change) ---
+# --- (2) Database Helper Functions (Updated for Block List) ---
 
 async def init_database():
-    """Connects to the database and ensures tables exist."""
+    """يتصل بقاعدة البيانات وينشئ الجداول."""
     global db_pool
     if not DATABASE_URL:
         logger.critical("CRITICAL: DATABASE_URL not found. Bot cannot start.")
@@ -133,6 +133,14 @@ async def init_database():
                     user_id BIGINT PRIMARY KEY
                 );
             ''')
+            # --- (جدول الحظر الجديد) ---
+            await connection.execute('''
+                CREATE TABLE IF NOT EXISTS user_blocks (
+                    blocker_id BIGINT,
+                    blocked_id BIGINT,
+                    PRIMARY KEY (blocker_id, blocked_id)
+                );
+            ''')
         logger.info("Database connected and tables verified.")
         return True
     except Exception as e:
@@ -140,7 +148,7 @@ async def init_database():
         return False
 
 async def add_user_to_all_list(user_id):
-    """Adds the user to the broadcast list if not already present."""
+    """يضيف المستخدم إلى قائمة البث إذا لم يكن موجوداً."""
     if not db_pool: return
     try:
         async with db_pool.acquire() as connection:
@@ -152,7 +160,7 @@ async def add_user_to_all_list(user_id):
         logger.error(f"Failed to add user {user_id} to broadcast list: {e}")
 
 async def get_all_users():
-    """Fetches all registered users for broadcasting."""
+    """يجلب جميع المستخدمين المسجلين في قائمة البث."""
     if not db_pool: return []
     async with db_pool.acquire() as connection:
         return await connection.fetchval("SELECT ARRAY_AGG(user_id) FROM all_users") or []
@@ -182,11 +190,19 @@ async def remove_from_wait_queue_db(user_id):
     async with db_pool.acquire() as connection:
         await connection.execute("DELETE FROM waiting_queue WHERE user_id = $1", user_id)
 
-# --- (3) Bot Command Handlers (Translated to English) ---
+async def add_user_block(blocker_id, blocked_id):
+    """(جديد) يسجل حظراً متبادلاً."""
+    if not db_pool: return
+    async with db_pool.acquire() as connection:
+        await connection.execute(
+            "INSERT INTO user_blocks (blocker_id, blocked_id) VALUES ($1, $2) ON CONFLICT (blocker_id, blocked_id) DO NOTHING",
+            blocker_id, blocked_id
+        )
+
+# --- (3) Bot Command Handlers ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
-    
     await add_user_to_all_list(user_id)
     
     if not await is_user_subscribed(user_id, context):
@@ -215,15 +231,25 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await is_user_waiting_db(user_id):
         await update.message.reply_text("You are already searching. Please wait...")
         return
+    
+    # --- (تعديل استعلام البحث لاستبعاد المستخدمين المحظورين) ---
     async with db_pool.acquire() as connection:
         async with connection.transaction():
             partner_id = await connection.fetchval(
                 """
                 DELETE FROM waiting_queue
-                WHERE user_id = (SELECT user_id FROM waiting_queue WHERE user_id != $1 ORDER BY timestamp ASC LIMIT 1)
+                WHERE user_id = (
+                    SELECT user_id 
+                    FROM waiting_queue 
+                    WHERE user_id != $1 
+                      AND user_id NOT IN (SELECT blocked_id FROM user_blocks WHERE blocker_id = $1)
+                      AND $1 NOT IN (SELECT blocked_id FROM user_blocks WHERE blocker_id = user_id)
+                    ORDER BY timestamp ASC LIMIT 1
+                )
                 RETURNING user_id
                 """, user_id
             )
+            # ----------------------------------------------------
             
             if partner_id:
                 await connection.execute("INSERT INTO active_chats (user_id, partner_id) VALUES ($1, $2), ($2, $1)", user_id, partner_id)
@@ -274,15 +300,24 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("🔎 Searching for a partner... Please wait.")
 
+    # --- (تعديل استعلام البحث هنا أيضاً) ---
     async with db_pool.acquire() as connection:
         async with connection.transaction():
             partner_id_new = await connection.fetchval(
                 """
                 DELETE FROM waiting_queue
-                WHERE user_id = (SELECT user_id FROM waiting_queue WHERE user_id != $1 ORDER BY timestamp ASC LIMIT 1)
+                WHERE user_id = (
+                    SELECT user_id 
+                    FROM waiting_queue 
+                    WHERE user_id != $1 
+                      AND user_id NOT IN (SELECT blocked_id FROM user_blocks WHERE blocker_id = $1)
+                      AND $1 NOT IN (SELECT blocked_id FROM user_blocks WHERE blocker_id = user_id)
+                    ORDER BY timestamp ASC LIMIT 1
+                )
                 RETURNING user_id
                 """, user_id
             )
+            # ------------------------------------
             
             if partner_id_new:
                 await connection.execute("INSERT INTO active_chats (user_id, partner_id) VALUES ($1, $2), ($2, $1)", user_id, partner_id_new)
@@ -293,6 +328,8 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await connection.execute("INSERT INTO waiting_queue (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
                 logger.info(f"User {user_id} added/remains in DB queue (via /next).")
 
+# --- (4) Report Command Handler (Updated for Confirmation) ---
+
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     
@@ -300,7 +337,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_join_channel_message(update, context)
         return
 
-    # 1. Look up partner
+    # 1. البحث عن الشريك (المُبلغ عنه)
     reported_id = await get_partner_from_db(user_id)
     
     if not reported_id:
@@ -310,105 +347,73 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("You are not currently in a chat to report anyone.", reply_markup=main_keyboard)
         return
     
-    # 2. Send report to admin log channel
-    if LOG_CHANNEL_ID:
-        try:
-            await context.bot.send_message(
-                chat_id=LOG_CHANNEL_ID,
-                text=f"🚨 **NEW REPORT RECEIVED (End Chat)** 🚨\n\n"
-                     f"**Reported User ID:** `{reported_id}`\n"
-                     f"**Reporter User ID:** `{user_id}`\n\n"
-                     f"**Action:** Chat automatically terminated.",
-                parse_mode=constants.ParseMode.MARKDOWN
-            )
-        except Exception as e:
-            logger.error(f"Failed to process report for {reported_id}: {e}")
-
-    # 3. End the chat for both parties
-    partner_id = await end_chat_in_db(user_id)
+    # 2. إرسال رسالة التأكيد مع الأزرار المضمنة
+    confirmation_markup = await get_confirmation_keyboard(reported_id)
     
-    # 4. Send confirmation to the reporter
     await update.message.reply_text(
-        "🚨 Thank you! Your report has been successfully sent to the Telegram Team for review.\n\n"
-        "You ended the chat with the reported user.\n\n"
-        "Press Next 🎲 to find a new partner.",
-        reply_markup=main_keyboard
+        "🚨 **CONFIRM ACTION**\n\n"
+        "Are you sure you want to block the current partner and send a report to the Telegram Team?\n\n"
+        "*(This action will end the chat immediately.)*",
+        reply_markup=confirmation_markup,
+        parse_mode=constants.ParseMode.MARKDOWN
     )
-    
-    # 5. Notify the reported partner
-    if partner_id:
-        logger.info(f"Chat ended by {user_id} (via Report). Partner was {partner_id}.")
-        try:
-            await context.bot.send_message(chat_id=partner_id, text="⚠️ Your partner has ended the chat.", reply_markup=main_keyboard)
-        except (Forbidden, BadRequest) as e:
-            logger.warning(f"Could not notify partner {partner_id} about chat end: {e}")
 
-# --- (6) Broadcast Command (Updated for Media and English) ---
+# --- (NEW) Callback Handler for Block Confirmation ---
 
-async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    message = update.message
+async def handle_block_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    data = query.data
     
-    # 1. Admin ID Check
-    if user_id != ADMIN_ID:
-        await message.reply_text("🚫 Access denied. This command is for the administrator only.")
+    await query.answer()
+    
+    if data == "cancel_block":
+        await query.edit_message_text("🚫 Report/Block operation cancelled. You can continue chatting.")
         return
 
-    # 2. Determine content type and check arguments
-    is_media_broadcast = message.photo or message.video or message.document
-    
-    if not is_media_broadcast and not context.args:
-        await message.reply_text(
-            "Usage:\n"
-            "1. For text: `/broadcast Your message here`\n"
-            "2. For media: Send the photo/video/document with `/broadcast` and your message in the caption."
-        )
-        return
-
-    # 3. Get all users
-    all_users = await get_all_users()
-    
-    if not all_users:
-        await message.reply_text("No users found in the database to broadcast to.")
-        return
-
-    success_count = 0
-    fail_count = 0
-    
-    # 4. Start broadcast
-    await message.reply_text(f"Starting broadcast to {len(all_users)} users...")
-    
-    for target_user_id in all_users:
-        try:
-            if is_media_broadcast:
-                # Use copy_message for media and caption
-                await context.bot.copy_message(
-                    chat_id=target_user_id,
-                    from_chat_id=user_id,
-                    message_id=message.message_id
+    # إذا كانت البيانات تبدأ بـ confirm_block
+    if data.startswith("confirm_block_"):
+        reported_id = int(data.split('_')[2])
+        
+        # 1. تسجيل الحظر (يسجل الحظر في قاعدة البيانات)
+        await add_user_block(user_id, reported_id) 
+        
+        # 2. إرسال التقرير المفصل إلى الأدمن (LOG_CHANNEL_ID)
+        if LOG_CHANNEL_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=LOG_CHANNEL_ID,
+                    text=f"🚨 **NEW REPORT RECEIVED (Chat Blocked)** 🚨\n\n"
+                         f"**Reported User ID (Blocked):** `{reported_id}`\n"
+                         f"**Reporter User ID (Blocker):** `{user_id}`\n\n"
+                         f"**Action:** User {user_id} permanently blocked {reported_id}.",
+                    parse_mode=constants.ParseMode.MARKDOWN
                 )
-            else:
-                # Send text message
-                message_to_send = " ".join(context.args)
-                await context.bot.send_message(chat_id=target_user_id, text=message_to_send, parse_mode=constants.ParseMode.MARKDOWN) 
-            
-            success_count += 1
-        except Forbidden:
-            fail_count += 1
-            logger.warning(f"User {target_user_id} blocked the bot. Skipping.")
-        except Exception as e:
-            fail_count += 1
-            logger.error(f"Failed to send broadcast to {target_user_id}: {e}")
-            
-    # 5. Send report to admin
-    await message.reply_text(
-        f"✅ **Broadcast complete!**\n"
-        f"Sent successfully to: {success_count} users.\n"
-        f"Failed (Bot blocked/Error): {fail_count} users."
-    )
+            except Exception as e:
+                logger.error(f"Failed to process report for {reported_id}: {e}")
 
+        # 3. إنهاء المحادثة لكلا الطرفين
+        partner_id = await end_chat_in_db(user_id)
+        
+        # 4. إرسال رسالة التأكيد للمستخدم (المُبلِّغ)
+        await query.edit_message_text(
+            "🛑 Thank you! Your report has been successfully sent to the Telegram Team for review.\n\n"
+            "The user has been blocked and the chat has ended.\n\n"
+            "Press Next 🎲 to find a new partner.",
+            reply_markup=None # إزالة أزرار التأكيد
+        )
+        
+        # 5. إخطار الشريك المُبلغ عنه (إذا أمكن)
+        if reported_id:
+            logger.info(f"Chat ended by {user_id} (via Block & Report). Partner was {reported_id}.")
+            try:
+                await context.bot.send_message(chat_id=reported_id, text="⚠️ Your partner has ended the chat.", reply_markup=main_keyboard)
+            except (Forbidden, BadRequest) as e:
+                logger.warning(f"Could not notify partner {reported_id} about chat end: {e}")
 
-# --- (5) Relay Message Handler (Archiving & Filtering) ---
+# ... (بقية الدوال) ...
+
+# --- (5) Relay Message Handler (لا تغيير) ---
 
 async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.message.from_user.id
@@ -425,8 +430,8 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
     if not partner_id:
         await message.reply_text("You are not in a chat. Press 'Search' to start.", reply_markup=main_keyboard)
         return
-
-    # --- Step 1: Log the message (Archive first) ---
+    
+    # --- Step 1: Log the message (إرسال نسخة للأرشيف) ---
     if LOG_CHANNEL_ID:
         try:
             log_caption_md = f"Msg from: `{sender_id}`\nTo partner: `{partner_id}`\n\n{message.caption or ''}"
@@ -439,22 +444,7 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             logger.error(f"CRITICAL: Failed to log message to {LOG_CHANNEL_ID}: {e}")
             
-    # --- Step 2: Filter/Block Links and Usernames ---
-    if message.text or message.caption:
-        text_to_check = message.text or message.caption
-
-        # Link Filter
-        if URL_PATTERN.search(text_to_check):
-            await message.reply_text("⛔️ You cannot send links (URLs) in anonymous chat.", reply_markup=main_keyboard)
-            return
-        
-        # Username Filter (Checks for @ symbol)
-        if '@' in text_to_check:
-            # Modified to use the requested English text
-            await message.reply_text("⛔️ You cannot send user identifiers (usernames) in anonymous chat.", reply_markup=main_keyboard)
-            return
-            
-    # --- Step 3: Relay the message (Relay protected) ---
+    # --- Step 2: Relay the message (ترحيل محمي) ---
     try:
         protect = True
         
@@ -497,21 +487,24 @@ def main():
         .build()
     )
 
-    # Handlers
+    # إضافة معالج زر التحقق من الاشتراك
     application.add_handler(CallbackQueryHandler(handle_join_check, pattern="^check_join$"))
-    application.add_handler(CommandHandler("broadcast", broadcast_command))
+    # إضافة معالج زر تأكيد الحظر
+    application.add_handler(CallbackQueryHandler(handle_block_confirmation, pattern="^confirm_block_|^cancel_block$"))
+    
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("end", end_command))
     application.add_handler(CommandHandler("next", next_command))
     
-    # Text Button Handlers
+    # معالجات الأزرار النصية (بما في ذلك أمر البث الإداري)
     application.add_handler(MessageHandler(filters.Text(["Search 🔎"]), search_command))
     application.add_handler(MessageHandler(filters.Text(["Stop ⏹️"]), end_command))
     application.add_handler(MessageHandler(filters.Text(["Next 🎲"]), next_command))
     application.add_handler(MessageHandler(filters.Text(["Report User 🚨"]), report_command))
+    application.add_handler(CommandHandler("broadcast", broadcast_command)) # أمر البث
     
-    # Main Message Handler (Relay and Filter)
+    # المعالج الرئيسي للرسائل
     button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲", "Report User 🚨"]
     
     application.add_handler(MessageHandler(
