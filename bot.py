@@ -258,7 +258,7 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await connection.execute("INSERT INTO waiting_queue (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
                 logger.info(f"User {user_id} added/remains in DB queue (via /next).")
 
-# --- (4) New Report Command Handler ---
+# --- (4) Report Command Handler ---
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -294,9 +294,11 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 3. إنهاء المحادثة لكلا الطرفين
     partner_id = await end_chat_in_db(user_id)
     
-    # 4. إرسال رسالة التأكيد للمستخدم (المُبلِّغ)
+    # 4. إرسال رسالة التأكيد للمستخدم (المُبلِّغ) - التعديل المطلوب
     await update.message.reply_text(
-        "Thank you! Your report has been successfully sent to the Telegram Team for review. The chat has ended.",
+        "🛑 Thank you! Your report has been successfully sent to the Telegram Team for review.\n\n"
+        "You ended the chat with the reported user.\n\n"
+        "Press Next 🎲 to find a new partner.",
         reply_markup=main_keyboard
     )
     
@@ -309,7 +311,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Could not notify partner {partner_id} about chat end: {e}")
 
 
-# --- (5) Relay Message Handler (تم إزالة زر التبليغ المضمن) ---
+# --- (5) Relay Message Handler ---
 
 async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.message.from_user.id
@@ -385,7 +387,6 @@ def main():
 
     # إضافة معالج زر التحقق من الاشتراك
     application.add_handler(CallbackQueryHandler(handle_join_check, pattern="^check_join$"))
-    # تم إزالة معالج التبليغ القديم (CallbackQueryHandler)
     
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("search", search_command))
@@ -395,6 +396,7 @@ def main():
     # معالجات الأزرار النصية
     application.add_handler(MessageHandler(filters.Text(["Search 🔎"]), search_command))
     application.add_handler(MessageHandler(filters.Text(["Stop ⏹️"]), end_command))
+    
     application.add_handler(MessageHandler(filters.Text(["Next 🎲"]), next_command))
     application.add_handler(MessageHandler(filters.Text(["Report 🚩"]), report_command)) # معالج التبليغ الجديد
     
