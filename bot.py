@@ -115,8 +115,22 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- (MODIFIED) DB Logic ---
     async with db_pool.acquire() as connection:
         async with connection.transaction(): # (نستخدم معاملة لضمان المطابقة)
-            # 1. ابحث عن أي شخص في الانتظار
-            partner_id = await connection.fetchval("DELETE FROM waiting_queue ORDER BY timestamp ASC RETURNING user_id")
+            
+            # --- (!!!) START OF FIX (!!!) ---
+            # (السطر القديم المسبب للمشكلة تم استبداله بهذا)
+            partner_id = await connection.fetchval(
+                """
+                DELETE FROM waiting_queue
+                WHERE user_id = (
+                    SELECT user_id
+                    FROM waiting_queue
+                    ORDER BY timestamp ASC
+                    LIMIT 1
+                )
+                RETURNING user_id
+                """
+            )
+            # --- (!!!) END OF FIX (!!!) ---
             
             if partner_id:
                 # 2. وجدنا شريكاً! قم بتسجيل المحادثة
@@ -171,10 +185,25 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔎 Searching for a partner... Please wait.")
 
     # --- 2. (MODIFIED) Search Logic ---
-    # (نفس منطق 'search_command' بالضبط)
     async with db_pool.acquire() as connection:
         async with connection.transaction():
-            partner_id_new = await connection.fetchval("DELETE FROM waiting_queue ORDER BY timestamp ASC RETURNING user_id")
+            
+            # --- (!!!) START OF FIX (!!!) ---
+            # (تم إصلاح نفس الخطأ هنا أيضاً)
+            partner_id_new = await connection.fetchval(
+                """
+                DELETE FROM waiting_queue
+                WHERE user_id = (
+                    SELECT user_id
+                    FROM waiting_queue
+                    ORDER BY timestamp ASC
+                    LIMIT 1
+                )
+                RETURNING user_id
+                """
+            )
+            # --- (!!!) END OF FIX (!!!) ---
+
             if partner_id_new:
                 await connection.execute(
                     "INSERT INTO active_chats (user_id, partner_id) VALUES ($1, $2), ($2, $1)",
