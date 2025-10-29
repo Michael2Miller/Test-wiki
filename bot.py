@@ -8,36 +8,36 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 
 # --- Settings ---
 try:
-    # المتغيرات الأساسية (ضرورية للتشغيل)
     TELEGRAM_TOKEN = os.environ['BOT_TOKEN']
     DATABASE_URL = os.environ['DATABASE_URL']
-    
-    # متغيرات الاشتراك الإجباري
+    # --- (إضافة متغيرات الاشتراك الإجباري) ---
     CHANNEL_ID = os.environ['CHANNEL_ID']
     CHANNEL_INVITE_LINK = os.environ['CHANNEL_INVITE_LINK']
-    
-    # متغير اختياري
+    # ----------------------------------------
     LOG_CHANNEL_ID = os.environ.get('LOG_CHANNEL_ID') 
 except KeyError as e:
-    logging.critical(f"FATAL ERROR: Environment variable {e} is not set.")
-    exit(f"Missing environment variable: {e}")
+    # استخدام logging بدلاً من print في هذا القسم
+    logging.critical(f"CRITICAL: Missing environment variable {e}. Bot cannot start.")
+    exit(f"Missing environment variable: {e}") 
 
 db_pool = None
 
+# إعداد logging لـ Railway
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --- Define Keyboard Buttons ---
+# --- Define Keyboard Buttons (مع التعديل الجديد) ---
 keyboard_buttons = [
-    ["Search 🔎", "Next 🎲"], 
+    ["Search 🔎", "Next 🎲"], # تم التغيير لـ Next 🎲
     ["Stop ⏹️"]
 ]
 main_keyboard = ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
+button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲"] # لتحديث فلتر الرسائل
 
-# --- Force Subscribe Helper Functions ---
+# --- (NEW SECTION) Force Subscribe Helper Functions ---
 
 async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """تتحقق مما إذا كان المستخدم عضواً في القناة."""
@@ -64,8 +64,14 @@ async def send_join_channel_message(update: Update, context: ContextTypes.DEFAUL
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    sender = update.message.reply_text if update.message else update.callback_query.message.reply_text
-    
+    # تحديد المرسل (لأن الدالة قد تستدعى من رسالة أو من callback)
+    if update.message:
+        sender = update.message.reply_text
+    elif update.callback_query:
+        sender = update.callback_query.message.reply_text
+    else:
+        return
+        
     await sender(
         r"👋 **Welcome to Random Partner 🎲\!**" + "\n\n"
         r"To use this bot, you are required to join our official channel\." + "\n\n"
@@ -75,30 +81,38 @@ async def send_join_channel_message(update: Update, context: ContextTypes.DEFAUL
     )
 
 async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يعالج ضغطة زر '✅ I have joined'."""
+    """يعالج ضغطة زر '✅ I have joined' للتحقق من الاشتراك."""
     query = update.callback_query
     user_id = query.from_user.id
     await query.answer("Checking your membership...")
     
     if await is_user_subscribed(user_id, context):
+        # نجح التحقق: إزالة الأزرار وإظهار لوحة المفاتيح الرئيسية
         await query.edit_message_text(
             r"🎉 **Thank you for joining\!**" + "\n\n"
             r"You can now use the bot\. Press /start or use the buttons below\.",
-            reply_markup=None, 
+            reply_markup=None, # إزالة الأزرار المضمنة
             parse_mode=constants.ParseMode.MARKDOWN_V2
         )
+        # (هام) إظهار لوحة المفاتيح الرئيسية
         await query.message.reply_text("Use the buttons below to control the chat:", reply_markup=main_keyboard)
     else:
+        # فشل التحقق
         await query.answer("Please subscribe to the channel first.", show_alert=True)
+
+# --- (END NEW SECTION) ---
+
 
 # --- Database Helper Functions ---
 
 async def init_database():
-    """يتصل بقاعدة البيانات وينشئ الجداول."""
+    """يتصل بقاعدة البيانات وينشئ الجداول إذا لم تكن موجودة."""
     global db_pool
     if not DATABASE_URL:
+        # استخدام logger بدلاً من print
         logger.critical("CRITICAL: DATABASE_URL not found. Bot cannot start.")
         return False
+        
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL)
         async with db_pool.acquire() as connection:
@@ -121,36 +135,45 @@ async def init_database():
         return False
 
 async def get_partner_from_db(user_id):
+    """يتحقق مما إذا كان المستخدم في محادثة نشطة ويعيد الشريك."""
     if not db_pool: return None
     async with db_pool.acquire() as connection:
         return await connection.fetchval("SELECT partner_id FROM active_chats WHERE user_id = $1", user_id)
 
 async def is_user_waiting_db(user_id):
+    """يتحقق مما إذا كان المستخدم في قائمة الانتظار."""
     if not db_pool: return False
     async with db_pool.acquire() as connection:
         return await connection.fetchval("SELECT 1 FROM waiting_queue WHERE user_id = $1", user_id) is not None
 
 async def end_chat_in_db(user_id):
+    """ينهي المحادثة في قاعدة البيانات ويعيد الشريك."""
     if not db_pool: return None
     async with db_pool.acquire() as connection:
-        async with connection.transaction():
+        async with connection.transaction(): 
             partner_id = await connection.fetchval("DELETE FROM active_chats WHERE user_id = $1 RETURNING partner_id", user_id)
             if partner_id:
                 await connection.execute("DELETE FROM active_chats WHERE user_id = $1", partner_id)
             return partner_id
 
 async def remove_from_wait_queue_db(user_id):
+    """يزيل المستخدم من قائمة الانتظار."""
     if not db_pool: return
     async with db_pool.acquire() as connection:
         await connection.execute("DELETE FROM waiting_queue WHERE user_id = $1", user_id)
 
-# --- Bot Command Handlers ---
+
+# --- Bot Command Handlers (Modified for Subscription Check) ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    
+    # --- (التحقق من الاشتراك أولاً) ---
     if not await is_user_subscribed(user_id, context):
         await send_join_channel_message(update, context)
         return
+    # --------------------------------
+    
     if await get_partner_from_db(user_id):
         await update.message.reply_text("You are currently in a chat. Use the buttons below.", reply_markup=main_keyboard)
     elif await is_user_waiting_db(user_id):
@@ -165,17 +188,23 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    
+    # --- (التحقق من الاشتراك أولاً) ---
     if not await is_user_subscribed(user_id, context):
         await send_join_channel_message(update, context)
         return
+    # --------------------------------
+    
     if await get_partner_from_db(user_id):
         await update.message.reply_text("You are already in a chat! Press 'Stop' or 'Next' first.")
         return
     if await is_user_waiting_db(user_id):
         await update.message.reply_text("You are already searching. Please wait...")
         return
+
+    # --- DB Logic ---
     async with db_pool.acquire() as connection:
-        async with connection.transaction():
+        async with connection.transaction(): 
             partner_id = await connection.fetchval(
                 """
                 DELETE FROM waiting_queue
@@ -184,9 +213,13 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 """, user_id
             )
             
-            if partner_id: 
-                await connection.execute("INSERT INTO active_chats (user_id, partner_id) VALUES ($1, $2), ($2, $1)", user_id, partner_id)
+            if partner_id:
+                await connection.execute(
+                    "INSERT INTO active_chats (user_id, partner_id) VALUES ($1, $2), ($2, $1)",
+                    user_id, partner_id
+                )
                 logger.info(f"Match found! {user_id} <-> {partner_id}.")
+                
                 await context.bot.send_message(chat_id=user_id, text="✅ Partner found! The chat has started. (You are anonymous).", reply_markup=main_keyboard)
                 await context.bot.send_message(chat_id=partner_id, text="✅ Partner found! The chat has started. (You are anonymous).", reply_markup=main_keyboard)
             else:
@@ -196,10 +229,15 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def end_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    
+    # --- (التحقق من الاشتراك أولاً) ---
     if not await is_user_subscribed(user_id, context):
         await send_join_channel_message(update, context)
         return
+    # --------------------------------
+    
     partner_id = await end_chat_in_db(user_id)
+    
     if partner_id:
         logger.info(f"Chat ended by {user_id}. Partner was {partner_id}.")
         await context.bot.send_message(chat_id=user_id, text="🔚 You have ended the chat.", reply_markup=main_keyboard)
@@ -216,10 +254,15 @@ async def end_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    
+    # --- (التحقق من الاشتراك أولاً) ---
     if not await is_user_subscribed(user_id, context):
         await send_join_channel_message(update, context)
         return
+    # --------------------------------
+    
     partner_id = await end_chat_in_db(user_id)
+    
     if partner_id:
         logger.info(f"Chat ended by {user_id} (via /next). Partner was {partner_id}.")
         await context.bot.send_message(chat_id=user_id, text="🔚 Chat ended. Searching for new partner...")
@@ -233,6 +276,7 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("🔎 Searching for a partner... Please wait.")
 
+    # --- Search Logic ---
     async with db_pool.acquire() as connection:
         async with connection.transaction():
             partner_id_new = await connection.fetchval(
@@ -256,13 +300,20 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.message.from_user.id
     message = update.message
+    
+    # --- (التحقق من الاشتراك أولاً) ---
     if not await is_user_subscribed(sender_id, context):
         await send_join_channel_message(update, context)
         return
+    # --------------------------------
+    
     partner_id = await get_partner_from_db(sender_id)
+    
     if not partner_id:
         await message.reply_text("You are not in a chat. Press 'Search' to start.", reply_markup=main_keyboard)
         return
+
+    # --- Step 1: Log the message ---
     if LOG_CHANNEL_ID:
         try:
             log_caption_md = f"Msg from: `{sender_id}`\nTo partner: `{partner_id}`\n\n{message.caption or ''}"
@@ -274,6 +325,8 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
             elif message.text: await context.bot.send_message(chat_id=LOG_CHANNEL_ID, text=log_text, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"CRITICAL: Failed to log message to {LOG_CHANNEL_ID}: {e}")
+            
+    # --- Step 2: Relay the message ---
     try:
         protect = True
         if message.photo: await context.bot.send_photo(chat_id=partner_id, photo=message.photo[-1].file_id, caption=message.caption, protect_content=protect)
@@ -314,7 +367,9 @@ def main():
         .build()
     )
 
+    # إضافة معالج زر التحقق من الاشتراك
     application.add_handler(CallbackQueryHandler(handle_join_check, pattern="^check_join$"))
+    
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("end", end_command))
