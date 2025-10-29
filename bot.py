@@ -252,51 +252,64 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         print(f"An unexpected error occurred sending to {partner_id}: {e}")
 
-# --- (MODIFIED) Main Run Function (Async) ---
+# --- (MODIFIED) Main Run Function (The Fix) ---
 
-async def main_async():
-    """الدالة الرئيسية غير المتزامنة لتشغيل البوت"""
-    if not TELEGRAM_TOKEN:
-        print("CRITICAL: BOT_TOKEN not found.")
-        return
-    
-    # (جديد) الاتصال بقاعدة البيانات أولاً
+async def post_database_init(application: Application):
+    """
+    (جديد) دالة تعمل بعد تهيئة البوت وقبل بدء التشغيل.
+    نتصل بقاعدة البيانات هنا.
+    """
     if not await init_database():
-        print("CRITICAL: Bot shutting down due to database connection failure.")
-        return
+        # إذا فشل الاتصال بقاعدة البيانات، نمنع البوت من البدء
+        raise RuntimeError("Database connection failed. Aborting startup.")
     
     if not LOG_CHANNEL_ID:
         print("WARNING: LOG_CHANNEL_ID not found. Bot will work, but logging/archiving is DISABLED.")
-        
-    print("Bot (1-on-1 + DB + Logging + Protection + Buttons) is running...")
     
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    print("Database connected. Bot is ready to start polling...")
 
-    # إضافة المعالجات (تبقى كما هي)
+
+def main():
+    """الدالة الرئيسية لتشغيل البوت"""
+    if not TELEGRAM_TOKEN:
+        print("CRITICAL: BOT_TOKEN not found.")
+        return
+
+    print("Bot starting up...")
+
+    # (جديد) بناء التطبيق مع خطاف post_init
+    # هذا هو الحل الاحترافي للمشكلة
+    application = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .post_init(post_database_init)  # <-- سيقوم بتشغيل دالة الاتصال بقاعدة البيانات في الوقت المناسب
+        .build()
+    )
+
+    # --- إضافة جميع المعالجات (Handlers) ---
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("end", end_command))
     application.add_handler(CommandHandler("next", next_command))
 
+    # معالجات الأزرار
     application.add_handler(MessageHandler(filters.Text(["Search 🔎"]), search_command))
     application.add_handler(MessageHandler(filters.Text(["Stop ⏹️"]), end_command))
     application.add_handler(MessageHandler(filters.Text(["Next ↪️"]), next_command))
     
+    # المعالج الرئيسي للرسائل (يجب أن يكون الأخير)
     button_texts = ["Search 🔎", "Stop ⏹️", "Next ↪️"]
     application.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.Text(button_texts), 
         relay_and_log_message
     ))
+    # --- نهاية إضافة المعالجات ---
 
-    # تشغيل البوت
-    await application.run_polling()
+    # (جديد) تشغيل البوت
+    # هذه الدالة الآن تدير كل شيء بنفسها، بما في ذلك asyncio
+    print("Bot setup complete. Starting polling...")
+    application.run_polling()
 
-def main():
-    """الدالة الرئيسية لتشغيل البوت"""
-    try:
-        asyncio.run(main_async())
-    except KeyboardInterrupt:
-        print("Bot stopped by admin.")
 
 if __name__ == "__main__":
     main()
