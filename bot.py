@@ -27,24 +27,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Define Keyboard Buttons (الترتيب النهائي والصحيح) ---
+# --- Define Keyboard Buttons ---
 keyboard_buttons = [
     ["Search 🔎", "Next 🎲"], 
-    ["Report User 🚨", "Stop ⏹️"] # <--- تم عكس الترتيب
+    ["Block User 🚫", "Stop ⏹️"] 
 ]
 main_keyboard = ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
-button_texts = ["Search 🔎", "Next 🎲", "Report User 🚨", "Stop ⏹️"]
+button_texts = ["Search 🔎", "Next 🎲", "Block User 🚫", "Stop ⏹️"]
 
-# --- NEW: URL and Username Pattern Definition ---
-# (تمت إعادة إضافة هذا الجزء)
+# --- URL and Username Pattern Definition (مُفعلة الآن) ---
 URL_PATTERN = re.compile(
     r'(https?://|www\.|t\.me/|t\.co/|telegram\.me/|telegram\.dog/)'
     r'[\w\.-]+(\.[\w\.-]+)*([\w\-\._~:/\?#\[\]@!$&\'()*+,;=])*',
     re.IGNORECASE
 )
 
-# --- (NEW) Define Confirmation Keyboard ---
-# (الأزرار المضمنة لخطوة التأكيد - زر واحد في كل صف)
+# --- Define Confirmation Keyboard ---
 async def get_confirmation_keyboard(reported_id):
     keyboard = [
         [InlineKeyboardButton("✅ Block and Report Now", callback_data=f"confirm_block_{reported_id}")],
@@ -251,6 +249,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                       AND $1 NOT IN (SELECT blocked_id FROM user_blocks WHERE blocker_id = user_id)
                     ORDER BY timestamp ASC LIMIT 1
                 )
+                WHERE user_id IN (SELECT user_id FROM waiting_queue WHERE user_id != $1)
                 RETURNING user_id
                 """, user_id
             )
@@ -333,9 +332,9 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await connection.execute("INSERT INTO waiting_queue (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
                 logger.info(f"User {user_id} added/remains in DB queue (via /next).")
 
-# --- (NEW) Report and Block Handlers ---
+# --- (NEW) Block User Handlers ---
 
-async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def block_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     
     if not await is_user_subscribed(user_id, context):
@@ -346,16 +345,16 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not reported_id:
         if await is_user_waiting_db(user_id):
-            await update.message.reply_text("You cannot report while searching. Use 'Stop ⏹️' first.")
+            await update.message.reply_text("You cannot block anyone while searching. Use 'Stop ⏹️' first.")
         else:
-            await update.message.reply_text("You are not currently in a chat to report anyone.", reply_markup=main_keyboard)
+            await update.message.reply_text("You are not currently in a chat to block anyone.", reply_markup=main_keyboard)
         return
     
-    # 1. إرسال رسالة التأكيد مع الأزرار المضمنة
+    # 1. إرسال رسالة التأكيد مع الأزرار المضمنة (كما هو مطلوب)
     confirmation_markup = await get_confirmation_keyboard(reported_id)
     
     await update.message.reply_text(
-        "🚨 **CONFIRM ACTION**\n\n"
+        "🚫 **CONFIRM BLOCK AND REPORT**\n\n"
         "Are you sure you want to block the current partner and send a report to the Telegram Team?\n\n"
         "*(This action will end the chat immediately.)*",
         reply_markup=confirmation_markup,
@@ -370,7 +369,7 @@ async def handle_block_confirmation(update: Update, context: ContextTypes.DEFAUL
     await query.answer()
     
     if data == "cancel_block":
-        await query.edit_message_text("🚫 Report/Block operation cancelled. You can continue chatting.")
+        await query.edit_message_text("🚫 Block/Report operation cancelled. You can continue chatting.")
         return
 
     if data.startswith("confirm_block_"):
@@ -399,8 +398,8 @@ async def handle_block_confirmation(update: Update, context: ContextTypes.DEFAUL
         
         # 5. إرسال رسالة التأكيد للمستخدم (المُبلِّغ)
         await query.edit_message_text(
-            "🛑 Thank you! Your report has been successfully sent to the Telegram Team for review.\n\n"
-            "The user has been blocked and the chat has ended.\n\n"
+            "🛑 Thank you! The user has been blocked and the chat has ended.\n\n"
+            "Your report has been successfully sent for review.\n\n"
             "Press Next 🎲 to find a new partner.",
             reply_markup=None # إزالة أزرار التأكيد
         )
@@ -414,7 +413,7 @@ async def handle_block_confirmation(update: Update, context: ContextTypes.DEFAUL
                 logger.warning(f"Could not notify partner {reported_id} about chat end: {e}")
 
 
-# --- (6) Broadcast Command (Updated for Media and English) ---
+# --- (4) Broadcast Command ---
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -479,7 +478,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# --- (7) Relay Message Handler (النسخة النهائية مع الفلاتر والأرشفة أولاً) ---
+# --- (5) Relay Message Handler (مع تفعيل فلاتر الروابط واليوزرات) ---
 
 async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.message.from_user.id
@@ -510,7 +509,7 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             logger.error(f"CRITICAL: Failed to log message to {LOG_CHANNEL_ID}: {e}")
             
-    # --- Step 2: Filter/Block Links and Usernames ---
+    # --- Step 2: Filter/Block Links and Usernames (هذا الجزء مُفعّل الآن) ---
     if message.text or message.caption:
         text_to_check = message.text or message.caption
 
@@ -524,7 +523,7 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
             await message.reply_text("⛔️ You cannot send user identifiers (usernames) in anonymous chat.", reply_markup=main_keyboard)
             return
             
-    # --- Step 3: Relay the message (ترحيل محمي) ---
+    # --- Step 3: Relay the message (ترحيل محمي - تم التأكد من تفعيل الحماية) ---
     try:
         protect = True
         
@@ -533,7 +532,9 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
         elif message.video: await context.bot.send_video(chat_id=partner_id, video=message.video.file_id, caption=message.caption, protect_content=protect)
         elif message.sticker: await context.bot.send_sticker(chat_id=partner_id, sticker=message.sticker.file_id, protect_content=protect)
         elif message.voice: await context.bot.send_voice(chat_id=partner_id, voice=message.voice.file_id, caption=message.caption, protect_content=protect)
-        elif message.text: await context.bot.send_message(chat_id=partner_id, text=message.text, protect_content=protect)
+        elif message.text: 
+            # ملاحظة: تم التأكد من تطبيق protect_content=True للنص أيضاً
+            await context.bot.send_message(chat_id=partner_id, text=message.text, protect_content=protect)
         
     except (Forbidden, BadRequest) as e:
         if "bot was blocked" in str(e).lower() or "user is deactivated" in str(e).lower() or "chat not found" in str(e).lower():
@@ -572,7 +573,7 @@ def main():
     # إضافة معالج زر تأكيد الحظر
     application.add_handler(CallbackQueryHandler(handle_block_confirmation, pattern="^confirm_block_|^cancel_block$"))
     
-    # أمر البث (تم نقله هنا لتصحيح NameError)
+    # أمر البث 
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     
     application.add_handler(CommandHandler("start", start_command))
@@ -580,15 +581,15 @@ def main():
     application.add_handler(CommandHandler("end", end_command))
     application.add_handler(CommandHandler("next", next_command))
     
-    # معالجات الأزرار النصية
+    # معالجات الأزرار النصية 
     application.add_handler(MessageHandler(filters.Text(["Search 🔎"]), search_command))
     application.add_handler(MessageHandler(filters.Text(["Stop ⏹️"]), end_command))
-    
     application.add_handler(MessageHandler(filters.Text(["Next 🎲"]), next_command))
-    application.add_handler(MessageHandler(filters.Text(["Report User 🚨"]), report_command))
+    application.add_handler(MessageHandler(filters.Text(["Block User 🚫"]), block_user_command)) 
+
     
     # المعالج الرئيسي للرسائل
-    button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲", "Report User 🚨"]
+    button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲", "Block User 🚫"]
     
     application.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.Text(button_texts),
