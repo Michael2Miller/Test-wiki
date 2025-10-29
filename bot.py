@@ -30,13 +30,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Define Keyboard Buttons (تم تعديل رمز التبليغ) ---
+# --- Define Keyboard Buttons (تم عكس ترتيب الأزرار السفلية) ---
 keyboard_buttons = [
     ["Search 🔎", "Next 🎲"], 
-    ["Stop ⏹️", "Report User 🚨"] # <--- تم التعديل هنا
+    ["Report User 🚨", "Stop ⏹️"] # <--- التعديل النهائي هنا
 ]
 main_keyboard = ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
-button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲", "Report User 🚨"] # <--- تم التعديل هنا
+button_texts = ["Search 🔎", "Next 🎲", "Report User 🚨", "Stop ⏹️"] # <--- تم تحديث الترتيب هنا أيضاً
 
 # --- (1) Force Subscribe Helper Functions ---
 
@@ -296,7 +296,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # 4. إرسال رسالة التأكيد للمستخدم (المُبلِّغ) - التعديل النهائي هنا
     await update.message.reply_text(
-        "🚨 Thank you! Your report has been successfully sent to the Telegram Team for review.\n\n" # <--- تم تغيير الرمز هنا
+        "🚨 Thank you! Your report has been successfully sent to the Telegram Team for review.\n\n"
         "You ended the chat with the reported user.\n\n"
         "Press Next 🎲 to find a new partner.",
         reply_markup=main_keyboard
