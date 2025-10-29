@@ -2,23 +2,23 @@ import os
 import asyncio
 import asyncpg
 import logging
-import re # <--- (مستورد للتحقق من الروابط واليوزرات)
+import re
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, constants
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 from telegram.error import BadRequest, Forbidden
 
 # --- Settings & Environment Variables ---
 try:
-    # المتغيرات الأساسية للتشغيل
+    # Essential Variables
     TELEGRAM_TOKEN = os.environ['BOT_TOKEN']
     DATABASE_URL = os.environ['DATABASE_URL']
-    ADMIN_ID = int(os.environ['ADMIN_ID']) # User ID الأدمن
+    ADMIN_ID = int(os.environ['ADMIN_ID']) # Admin User ID
     
-    # متغيرات الاشتراك الإجباري
+    # Force Subscribe Variables
     CHANNEL_ID = os.environ['CHANNEL_ID']
     CHANNEL_INVITE_LINK = os.environ['CHANNEL_INVITE_LINK']
     
-    # متغير اختياري
+    # Optional Variable
     LOG_CHANNEL_ID = os.environ.get('LOG_CHANNEL_ID') 
 except KeyError as e:
     logging.critical(f"CRITICAL: Missing environment variable {e}. Bot cannot start.")
@@ -32,7 +32,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Define Keyboard Buttons (لا تغيير) ---
+# --- Define Keyboard Buttons ---
 keyboard_buttons = [
     ["Search 🔎", "Next 🎲"], 
     ["Report User 🚨", "Stop ⏹️"] 
@@ -40,16 +40,16 @@ keyboard_buttons = [
 main_keyboard = ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 button_texts = ["Search 🔎", "Next 🎲", "Report User 🚨", "Stop ⏹️"]
 
-# --- URL and Username Pattern Definition (لتفعيل الفلاتر) ---
+# --- URL and Username Pattern Definition ---
 URL_PATTERN = re.compile(
-    r'(https?://|www\.|t\.me/|t\.co/|telegram\.me/|telegram\.dog/)' # Common prefixes
-    r'[\w\.-]+(\.[\w\.-]+)*([\w\-\._~:/\?#\[\]@!$&\'()*+,;=])*', # Domain and path
+    r'(https?://|www\.|t\.me/|t\.co/|telegram\.me/|telegram\.dog/)'
+    r'[\w\.-]+(\.[\w\.-]+)*([\w\-\._~:/\?#\[\]@!$&\'()*+,;=])*',
     re.IGNORECASE
 )
 # --- End URL Pattern Definition ---
 
 
-# --- (1) Force Subscribe Helper Functions (لا تغيير) ---
+# --- (1) Force Subscribe Helper Functions ---
 
 async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     try:
@@ -105,10 +105,10 @@ async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.answer("Please subscribe to the channel first.", show_alert=True)
 
-# --- (2) Database Helper Functions ---
+# --- (2) Database Helper Functions (No change) ---
 
 async def init_database():
-    """يتصل بقاعدة البيانات وينشئ الجداول."""
+    """Connects to the database and ensures tables exist."""
     global db_pool
     if not DATABASE_URL:
         logger.critical("CRITICAL: DATABASE_URL not found. Bot cannot start.")
@@ -140,7 +140,7 @@ async def init_database():
         return False
 
 async def add_user_to_all_list(user_id):
-    """يضيف المستخدم إلى قائمة البث إذا لم يكن موجوداً."""
+    """Adds the user to the broadcast list if not already present."""
     if not db_pool: return
     try:
         async with db_pool.acquire() as connection:
@@ -152,10 +152,9 @@ async def add_user_to_all_list(user_id):
         logger.error(f"Failed to add user {user_id} to broadcast list: {e}")
 
 async def get_all_users():
-    """يجلب جميع المستخدمين المسجلين في قائمة البث."""
+    """Fetches all registered users for broadcasting."""
     if not db_pool: return []
     async with db_pool.acquire() as connection:
-        # fetchval returns the value of the first column of the first row
         return await connection.fetchval("SELECT ARRAY_AGG(user_id) FROM all_users") or []
 
 
@@ -183,7 +182,7 @@ async def remove_from_wait_queue_db(user_id):
     async with db_pool.acquire() as connection:
         await connection.execute("DELETE FROM waiting_queue WHERE user_id = $1", user_id)
 
-# --- (3) Bot Command Handlers (لا تغيير في منطق الأوامر) ---
+# --- (3) Bot Command Handlers (Translated to English) ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -281,7 +280,7 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 """
                 DELETE FROM waiting_queue
                 WHERE user_id = (SELECT user_id FROM waiting_queue WHERE user_id != $1 ORDER BY timestamp ASC LIMIT 1)
-                RETRUNING user_id
+                RETURNING user_id
                 """, user_id
             )
             
@@ -301,7 +300,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_join_channel_message(update, context)
         return
 
-    # 1. البحث عن الشريك (المُبلغ عنه)
+    # 1. Look up partner
     reported_id = await get_partner_from_db(user_id)
     
     if not reported_id:
@@ -311,24 +310,24 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("You are not currently in a chat to report anyone.", reply_markup=main_keyboard)
         return
     
-    # 2. إرسال التقرير المفصل إلى الأدمن
+    # 2. Send report to admin log channel
     if LOG_CHANNEL_ID:
         try:
             await context.bot.send_message(
                 chat_id=LOG_CHANNEL_ID,
                 text=f"🚨 **NEW REPORT RECEIVED (End Chat)** 🚨\n\n"
-                     f"**Reported User ID (المُبلغ عنه):** `{reported_id}`\n"
-                     f"**Reporter User ID (المُبلِّغ):** `{user_id}`\n\n"
+                     f"**Reported User ID:** `{reported_id}`\n"
+                     f"**Reporter User ID:** `{user_id}`\n\n"
                      f"**Action:** Chat automatically terminated.",
                 parse_mode=constants.ParseMode.MARKDOWN
             )
         except Exception as e:
             logger.error(f"Failed to process report for {reported_id}: {e}")
 
-    # 3. إنهاء المحادثة لكلا الطرفين
+    # 3. End the chat for both parties
     partner_id = await end_chat_in_db(user_id)
     
-    # 4. إرسال رسالة التأكيد للمستخدم (المُبلِّغ)
+    # 4. Send confirmation to the reporter
     await update.message.reply_text(
         "🚨 Thank you! Your report has been successfully sent to the Telegram Team for review.\n\n"
         "You ended the chat with the reported user.\n\n"
@@ -336,7 +335,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_keyboard
     )
     
-    # 5. إخطار الشريك المُبلغ عنه (إذا أمكن)
+    # 5. Notify the reported partner
     if partner_id:
         logger.info(f"Chat ended by {user_id} (via Report). Partner was {partner_id}.")
         try:
@@ -344,29 +343,29 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (Forbidden, BadRequest) as e:
             logger.warning(f"Could not notify partner {partner_id} about chat end: {e}")
 
-# --- (6) Broadcast Command (معدل لدعم الوسائط) ---
+# --- (6) Broadcast Command (Updated for Media and English) ---
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     message = update.message
     
-    # 1. التحقق من أن المستخدم هو الأدمن
+    # 1. Admin ID Check
     if user_id != ADMIN_ID:
         await message.reply_text("🚫 Access denied. This command is for the administrator only.")
         return
 
-    # 2. تحديد نوع الإرسال والتحقق من المحتوى
+    # 2. Determine content type and check arguments
     is_media_broadcast = message.photo or message.video or message.document
     
     if not is_media_broadcast and not context.args:
         await message.reply_text(
-            "طريقة الاستخدام:\n"
-            "1. للنص فقط: `/broadcast رسالتك هنا`\n"
-            "2. للصور/الفيديو: أرسل الصورة/الفيديو مع وضع الأمر `/broadcast` ونص الإعلان في التعليق (Caption)."
+            "Usage:\n"
+            "1. For text: `/broadcast Your message here`\n"
+            "2. For media: Send the photo/video/document with `/broadcast` and your message in the caption."
         )
         return
 
-    # 3. جلب جميع المستخدمين من قاعدة البيانات
+    # 3. Get all users
     all_users = await get_all_users()
     
     if not all_users:
@@ -376,23 +375,21 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     success_count = 0
     fail_count = 0
     
-    # 4. بدء عملية البث
+    # 4. Start broadcast
     await message.reply_text(f"Starting broadcast to {len(all_users)} users...")
     
     for target_user_id in all_users:
         try:
             if is_media_broadcast:
-                # استخدام copy_message لإرسال الوسائط والتعليق بكفاءة
-                # (رسالة الأدمن الأصلية هي التي يتم نسخها)
+                # Use copy_message for media and caption
                 await context.bot.copy_message(
                     chat_id=target_user_id,
                     from_chat_id=user_id,
                     message_id=message.message_id
                 )
             else:
-                # إرسال نصي كالمعتاد
+                # Send text message
                 message_to_send = " ".join(context.args)
-                # نستخدم Markdown لتحسين شكل إعلانات الأدمن
                 await context.bot.send_message(chat_id=target_user_id, text=message_to_send, parse_mode=constants.ParseMode.MARKDOWN) 
             
             success_count += 1
@@ -403,7 +400,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             fail_count += 1
             logger.error(f"Failed to send broadcast to {target_user_id}: {e}")
             
-    # 5. إرسال تقرير البث للأدمن
+    # 5. Send report to admin
     await message.reply_text(
         f"✅ **Broadcast complete!**\n"
         f"Sent successfully to: {success_count} users.\n"
@@ -411,7 +408,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# --- (5) Relay Message Handler (مع تفعيل الأرشفة أولاً ثم الحظر) ---
+# --- (5) Relay Message Handler (Archiving & Filtering) ---
 
 async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.message.from_user.id
@@ -429,8 +426,7 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
         await message.reply_text("You are not in a chat. Press 'Search' to start.", reply_markup=main_keyboard)
         return
 
-    # --- Step 1: Log the message (الأرشفة أولاً - يجب أن تتم قبل الحظر) ---
-    # يتم أرشفة الرسالة حتى لو كانت رابطاً، طالما تم إرسالها من المستخدم.
+    # --- Step 1: Log the message (Archive first) ---
     if LOG_CHANNEL_ID:
         try:
             log_caption_md = f"Msg from: `{sender_id}`\nTo partner: `{partner_id}`\n\n{message.caption or ''}"
@@ -443,22 +439,22 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             logger.error(f"CRITICAL: Failed to log message to {LOG_CHANNEL_ID}: {e}")
             
-    # --- Step 2: Filter/Block Links and Usernames (الحظر ثانياً) ---
-    # نتحقق من النص أو التعليق (Caption) إذا كانت الرسالة وسائط
+    # --- Step 2: Filter/Block Links and Usernames ---
     if message.text or message.caption:
         text_to_check = message.text or message.caption
 
-        # فلتر الروابط
+        # Link Filter
         if URL_PATTERN.search(text_to_check):
-            await message.reply_text("⛔️ لا يمكنك إرسال روابط (URLs) في الدردشة المجهولة.", reply_markup=main_keyboard)
-            return # توقف هنا، الرسالة مؤرشفة لكن لم يتم ترحيلها
-
-        # فلتر اليوزرات
+            await message.reply_text("⛔️ You cannot send links (URLs) in anonymous chat.", reply_markup=main_keyboard)
+            return
+        
+        # Username Filter (Checks for @ symbol)
         if '@' in text_to_check:
-            await message.reply_text("⛔️ لا يمكنك إرسال معرفات المستخدم (@usernames) في الدردشة المجهولة.", reply_markup=main_keyboard)
-            return # توقف هنا، الرسالة مؤرشفة لكن لم يتم ترحيلها
+            # Modified to use the requested English text
+            await message.reply_text("⛔️ You cannot send user identifiers (usernames) in anonymous chat.", reply_markup=main_keyboard)
+            return
             
-    # --- Step 3: Relay the message (ترحيل محمي - فقط إذا نجح في المرور من الفلتر) ---
+    # --- Step 3: Relay the message (Relay protected) ---
     try:
         protect = True
         
@@ -501,23 +497,21 @@ def main():
         .build()
     )
 
+    # Handlers
     application.add_handler(CallbackQueryHandler(handle_join_check, pattern="^check_join$"))
-    
     application.add_handler(CommandHandler("broadcast", broadcast_command))
-    
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("end", end_command))
     application.add_handler(CommandHandler("next", next_command))
     
-    # معالجات الأزرار النصية
+    # Text Button Handlers
     application.add_handler(MessageHandler(filters.Text(["Search 🔎"]), search_command))
     application.add_handler(MessageHandler(filters.Text(["Stop ⏹️"]), end_command))
-    
     application.add_handler(MessageHandler(filters.Text(["Next 🎲"]), next_command))
     application.add_handler(MessageHandler(filters.Text(["Report User 🚨"]), report_command))
     
-    # المعالج الرئيسي للرسائل
+    # Main Message Handler (Relay and Filter)
     button_texts = ["Search 🔎", "Stop ⏹️", "Next 🎲", "Report User 🚨"]
     
     application.add_handler(MessageHandler(
