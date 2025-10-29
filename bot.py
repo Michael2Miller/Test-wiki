@@ -2,22 +2,17 @@ import os
 import asyncio
 import asyncpg
 import logging
-import re
+import re # <--- (تمت إعادة الإضافة)
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, constants
-from telegram.error import BadRequest, Forbidden
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.error import BadRequest, Forbidden
 
-# --- Settings & Environment Variables ---
+# --- Settings & Environment Variables (لا تغيير) ---
 try:
-    # المتغيرات الأساسية للتشغيل
     TELEGRAM_TOKEN = os.environ['BOT_TOKEN']
     DATABASE_URL = os.environ['DATABASE_URL']
-    
-    # متغيرات الاشتراك الإجباري
     CHANNEL_ID = os.environ['CHANNEL_ID']
     CHANNEL_INVITE_LINK = os.environ['CHANNEL_INVITE_LINK']
-    
-    # متغير اختياري
     LOG_CHANNEL_ID = os.environ.get('LOG_CHANNEL_ID') 
 except KeyError as e:
     logging.critical(f"CRITICAL: Missing environment variable {e}. Bot cannot start.")
@@ -31,18 +26,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Define Keyboard Buttons (تم عكس ترتيب Stop و Report) ---
+# --- Define Keyboard Buttons (لا تغيير) ---
 keyboard_buttons = [
     ["Search 🔎", "Next 🎲"], 
-    ["Report User 🚨", "Stop ⏹️"] # <--- التعديل تم هنا
+    ["Report User 🚨", "Stop ⏹️"] 
 ]
 main_keyboard = ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 button_texts = ["Search 🔎", "Next 🎲", "Report User 🚨", "Stop ⏹️"]
 
-# --- (1) Force Subscribe Helper Functions ---
+# --- (NEW) URL Pattern Definition ---
+URL_PATTERN = re.compile(
+    r'(https?://|www\.|t\.me/|t\.co/|telegram\.me/|telegram\.dog/)' # Common prefixes
+    r'[\w\.-]+(\.[\w\.-]+)*([\w\-\._~:/\?#\[\]@!$&\'()*+,;=])*', # Domain and path
+    re.IGNORECASE
+)
+# --- End URL Pattern Definition ---
+
+
+# --- (1) Force Subscribe Helper Functions (لا تغيير) ---
 
 async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """تتحقق مما إذا كان المستخدم عضواً في القناة."""
     try:
         member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
         return member.status in ['member', 'administrator', 'creator']
@@ -57,7 +60,6 @@ async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
         return False
 
 async def send_join_channel_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ترسل رسالة الاشتراك الإجباري."""
     keyboard = [
         [
             InlineKeyboardButton("🔗 Join Channel", url=CHANNEL_INVITE_LINK),
@@ -82,7 +84,6 @@ async def send_join_channel_message(update: Update, context: ContextTypes.DEFAUL
     )
 
 async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يعالج ضغطة زر '✅ I have joined' للتحقق من الاشتراك."""
     query = update.callback_query
     user_id = query.from_user.id
     await query.answer("Checking your membership...")
@@ -98,10 +99,9 @@ async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.answer("Please subscribe to the channel first.", show_alert=True)
 
-# --- (2) Database Helper Functions ---
+# --- (2) Database Helper Functions (لا تغيير) ---
 
 async def init_database():
-    """يتصل بقاعدة البيانات وينشئ الجداول."""
     global db_pool
     if not DATABASE_URL:
         logger.critical("CRITICAL: DATABASE_URL not found. Bot cannot start.")
@@ -151,7 +151,7 @@ async def remove_from_wait_queue_db(user_id):
     async with db_pool.acquire() as connection:
         await connection.execute("DELETE FROM waiting_queue WHERE user_id = $1", user_id)
 
-# --- (3) Bot Command Handlers ---
+# --- (3) Bot Command Handlers (لا تغيير في الدوال نفسها) ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -259,7 +259,7 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await connection.execute("INSERT INTO waiting_queue (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
                 logger.info(f"User {user_id} added/remains in DB queue (via /next).")
 
-# --- (4) Report Command Handler ---
+# --- (4) Report Command Handler (لا تغيير) ---
 
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -311,15 +311,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (Forbidden, BadRequest) as e:
             logger.warning(f"Could not notify partner {partner_id} about chat end: {e}")
 
-
-# --- (5) Relay Message Handler ---
-
-# Regular expression to find common URL/link patterns (including t.me and www)
-URL_PATTERN = re.compile(
-    r'(https?://|www\.|t\.me/|t\.co/|telegram\.me/|telegram\.dog/)' # Common prefixes
-    r'[\w\.-]+(\.[\w\.-]+)*([\w\-\._~:/\?#\[\]@!$&\'()*+,;=])*', # Domain and path
-    re.IGNORECASE
-)
+# --- (5) Relay Message Handler (تم حذف الفلاتر) ---
 
 async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.message.from_user.id
@@ -329,20 +321,7 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
         await send_join_channel_message(update, context)
         return
     
-    # --- (NEW FILTER: Check for Text, Links, and Usernames) ---
-    if message.text:
-        text = message.text
-        
-        # 1. فحص أسماء المستخدمين (@Username)
-        if '@' in text:
-            await message.reply_text("🚫 Sending usernames (@) is not allowed to maintain anonymity.", reply_markup=main_keyboard)
-            return
-
-        # 2. فحص الروابط (URLs)
-        if URL_PATTERN.search(text):
-            await message.reply_text("🚫 Sending links or URLs is not allowed to maintain anonymity.", reply_markup=main_keyboard)
-            return
-    # --- (END NEW FILTER) ---
+    # --- (لا يوجد فلتر للروابط/اليوزرنيم هنا) ---
     
     partner_id = await get_partner_from_db(sender_id)
     
@@ -366,8 +345,6 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
     # --- Step 2: Relay the message (ترحيل محمي بدون زر إبلاغ) ---
     try:
         protect = True
-        
-        # لا يوجد report_markup هنا
         
         if message.photo: await context.bot.send_photo(chat_id=partner_id, photo=message.photo[-1].file_id, caption=message.caption, protect_content=protect)
         elif message.document: await context.bot.send_document(chat_id=partner_id, document=message.document.file_id, caption=message.caption, protect_content=protect)
@@ -393,7 +370,7 @@ async def post_database_init(application: Application):
     if not await init_database():
         raise RuntimeError("Database connection failed. Aborting startup.")
     if not LOG_CHANNEL_ID:
-        logger.warning("WARNING: LOG_CHANNEL_ID not found. Logging/ar chiving is DISABLED.")
+        logger.warning("WARNING: LOG_CHANNEL_ID not found. Logging/archiving is DISABLED.")
     logger.info("Database connected. Bot is ready to start polling...")
 
 def main():
