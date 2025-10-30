@@ -214,7 +214,43 @@ async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.answer("Please subscribe to the channel first.", show_alert=True)
 
-# --- (3) Admin Global Ban Commands ---
+# --- (3) Admin Commands ---
+# (تم وضع هذه الدوال هنا لتجنب NameError في الدالة main)
+
+async def sendid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    
+    # 1. التحقق من أن المستخدم هو الأدمن
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("🚫 Access denied. This command is for the administrator only.", protect_content=True)
+        return
+
+    # 2. التحقق من وجود ID والرسالة
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /sendid <Recipient_User_ID> <Your Message>", protect_content=True)
+        return
+
+    try:
+        # استخراج ID المستلم والرسالة
+        target_id = int(context.args[0])
+        message_to_send = " ".join(context.args[1:])
+        
+        # 3. محاولة الإرسال
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=f"📢 **Admin Message:**\n\n{message_to_send}",
+            parse_mode='Markdown',
+            protect_content=True
+        )
+        
+        # 4. تأكيد الإرسال للأدمن
+        await update.message.reply_text(f"✅ Message sent successfully to User ID: {target_id}", protect_content=True)
+        
+    except BadRequest as e:
+        await update.message.reply_text(f"❌ Failed to send: User ID {target_id} is unreachable or invalid. Error: {e.message}", protect_content=True)
+    except Exception as e:
+        await update.message.reply_text(f"❌ An unexpected error occurred: {e}", protect_content=True)
+
 
 async def banuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -251,7 +287,6 @@ async def banuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error banning user: {e}")
         await update.message.reply_text(f"❌ An error occurred during the ban process: {e}", protect_content=True)
 
-# --- (4) Broadcast Command ---
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -322,7 +357,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         protect_content=True
     )
 
-# --- (5) Bot Command Handlers (Includes Global Ban Filter) ---
+# --- (4) Bot Command Handlers (Continuation) ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -475,52 +510,15 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await connection.execute("INSERT INTO waiting_queue (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
                 logger.info(f"User {user_id} added/remains in DB queue (via /next).")
 
-# --- (NEW) Admin Global Ban Commands ---
+# --- (5) Report and Block Handlers ---
 
-async def banuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    
-    # 1. التحقق من أن المستخدم هو الأدمن
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("🚫 Access denied. Admin command only.", protect_content=True)
-        return
-
-    if len(context.args) != 1:
-        await update.message.reply_text("Usage: /banuser <User_ID_to_Ban>", protect_content=True)
-        return
-
-    try:
-        banned_id = int(context.args[0])
-        
-        # 2. تسجيل الحظر في جدول global_bans
-        async with db_pool.acquire() as connection:
-            await connection.execute(
-                "INSERT INTO global_bans (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
-                banned_id
-            )
-        
-        # 3. إخراج المستخدم من أي محادثة حالية أو قائمة انتظار (للتنظيف)
-        await end_chat_in_db(banned_id)
-        await remove_from_wait_queue_db(banned_id)
-        
-        # 4. إخطار الأدمن
-        await update.message.reply_text(f"✅ User ID {banned_id} has been permanently blocked from using the chat features.", protect_content=True)
-        
-    except ValueError:
-        await update.message.reply_text("❌ Invalid ID format. Must be a number.", protect_content=True)
-    except Exception as e:
-        logger.error(f"Error banning user: {e}")
-        await update.message.reply_text(f"❌ An error occurred during the ban process: {e}", protect_content=True)
-
-# --- (4) Report Command Handler ---
-
-async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def block_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     
     if await is_user_globally_banned(user_id):
         await update.message.reply_text("🚫 Your access to this bot has been permanently suspended.", protect_content=True)
         return
-        
+
     if not await is_user_subscribed(user_id, context):
         await send_join_channel_message(update, context)
         return
@@ -534,7 +532,7 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("You are not currently in a chat to block anyone.", reply_markup=main_keyboard, protect_content=True)
         return
     
-    # 1. إرسال رسالة التأكيد مع الأزرار المضمنة (كما هو مطلوب)
+    # 1. إرسال رسالة التأكيد مع الأزرار المضمنة
     confirmation_markup = await get_confirmation_keyboard(reported_id)
     
     await update.message.reply_text(
@@ -598,86 +596,12 @@ async def handle_block_confirmation(update: Update, context: ContextTypes.DEFAUL
             except (Forbidden, BadRequest) as e:
                 logger.warning(f"Could not notify partner {reported_id} about chat end: {e}")
 
-
-# --- (5) Broadcast Command (Updated for Media and English) ---
-
-async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    message = update.message
-    
-    # 1. التحقق من أن المستخدم هو الأدمن
-    if user_id != ADMIN_ID:
-        await message.reply_text("🚫 Access denied. This command is for the administrator only.", protect_content=True)
-        return
-
-    # 2. تحديد نوع الإرسال والتحقق من المحتوى
-    is_media_broadcast = message.photo or message.video or message.document
-    
-    if not is_media_broadcast and not context.args:
-        await message.reply_text(
-            "Usage:\n"
-            "1. For text: `/broadcast Your message here`\n"
-            "2. For media: Send the photo/video/document with `/broadcast` and your message in the caption.",
-            protect_content=True
-        )
-        return
-
-    # 3. جلب جميع المستخدمين من قاعدة البيانات
-    all_users = await get_all_users()
-    
-    if not all_users:
-        await message.reply_text("No users found in the database to broadcast to.", protect_content=True)
-        return
-
-    success_count = 0
-    fail_count = 0
-    
-    # 4. بدء عملية البث
-    await message.reply_text(f"Starting broadcast to {len(all_users)} users...", protect_content=True)
-    
-    for target_user_id in all_users:
-        try:
-            if is_media_broadcast:
-                # استخدام copy_message لإرسال الوسائط والتعليق بكفاءة
-                await context.bot.copy_message(
-                    chat_id=target_user_id,
-                    from_chat_id=user_id,
-                    message_id=message.message_id
-                )
-            else:
-                # إرسال نصي كالمعتاد
-                message_to_send = " ".join(context.args)
-                await context.bot.send_message(
-                    chat_id=target_user_id, 
-                    text=message_to_send, 
-                    parse_mode=constants.ParseMode.MARKDOWN,
-                    protect_content=True
-                ) 
-            
-            success_count += 1
-        except Forbidden:
-            fail_count += 1
-            logger.warning(f"User {target_user_id} blocked the bot. Skipping.")
-        except Exception as e:
-            fail_count += 1
-            logger.error(f"Failed to send broadcast to {target_user_id}: {e}")
-            
-    # 5. إرسال تقرير البث للأدمن
-    await message.reply_text(
-        f"✅ **Broadcast complete!**\n"
-        f"Sent successfully to: {success_count} users.\n"
-        f"Failed (Bot blocked/Error): {fail_count} users.",
-        protect_content=True
-    )
-
-
 # --- (6) Relay Message Handler (مع تفعيل فلاتر الروابط واليوزرات) ---
 
 async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.message.from_user.id
     message = update.message
     
-    # 🛑 (التحقق من الحظر الشامل) 🛑
     if await is_user_globally_banned(sender_id):
         await update.message.reply_text("🚫 Your access to this bot has been permanently suspended.", protect_content=True)
         return
@@ -780,7 +704,7 @@ def main():
     application.add_handler(CommandHandler("end", end_command))
     application.add_handler(CommandHandler("next", next_command))
     
-    # معالجات الأزرار النصية
+    # معالجات الأزرار النصية 
     application.add_handler(MessageHandler(filters.Text(["Search 🔎"]), search_command))
     application.add_handler(MessageHandler(filters.Text(["Stop ⏹️"]), end_command))
     
