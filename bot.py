@@ -2,7 +2,6 @@ import os
 import asyncio
 import asyncpg 
 import logging
-# (FIX) استيراد Union من مكتبة typing لضمان التوافق مع إصدارات بايثون الأقدم من 3.10
 from typing import Union 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, constants
 from telegram.error import BadRequest, Forbidden
@@ -29,7 +28,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- (NEW) Translation Dictionaries ---
+# --- (NEW) Translation Dictionaries (Remains the same) ---
 LANGUAGES = {
     'en': {
         'language_name': "English 🇬🇧",
@@ -146,7 +145,7 @@ LANGUAGES = {
         'admin_denied': "🚫 Acceso denegado. Este comando es solo para el administrador.",
         'globally_banned': "🚫 Tu acceso a este bot ha sido suspendido permanentemente.",
         'next_not_in_chat': "🔎 Buscando un compañero... Por favor espera.",
-        'block_not_in_chat': "Actualmente no estás en un chat para bloquear a nadie.",
+        'block_not_in_chat': "No estás actualmente en un chat para bloquear a nadie.",
         'block_while_searching': "No puedes bloquear a nadie mientras buscas. Usa 'Parar ⏹️' primero.",
         'join_channel_msg': r"👋 **¡Bienvenido a Compañero Aleatorio 🎲\!**" + "\n\n"
                             r"Para usar este bot, se requiere que te unas a nuestro canal oficial\." + "\n\n"
@@ -193,14 +192,14 @@ async def get_keyboard(lang_code):
     ]
     return ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 
-# --- NEW: URL and Username Pattern Definition ---
+# --- NEW: URL and Username Pattern Definition (Remains the same) ---
 URL_PATTERN = re.compile(
     r'(https?://|www\.|t\.me/|t\.co/|telegram\.me/|telegram\.dog/)'
     r'[\w\.-]+(\.[\w\.-]+)*([\w\-\._~:/\?#\[\]@!$&\'()*+,;=])*',
     re.IGNORECASE
 )
 
-# --- Define Confirmation Keyboard ---
+# --- Define Confirmation Keyboard (Remains the same) ---
 async def get_confirmation_keyboard(reported_id, lang_code):
     """(جديد) لوحة تأكيد الحظر بناءً على اللغة."""
     confirm_text = _('block_confirm_text', lang_code)
@@ -210,7 +209,7 @@ async def get_confirmation_keyboard(reported_id, lang_code):
     ]
     return InlineKeyboardMarkup(keyboard), confirm_text
 
-# --- (1) Database Helper Functions ---
+# --- (1) Database Helper Functions (Remains the same) ---
 
 async def is_user_globally_banned(user_id):
     """(جديد) يتحقق مما إذا كان المستخدم محظوراً بشكل شامل."""
@@ -264,7 +263,7 @@ async def init_database():
         logger.critical(f"CRITICAL: Failed to connect to database: {e}")
         return False
 
-# --- (NEW) Database Check Function ---
+# --- (NEW) Database Check Function (Remains the same) ---
 async def check_if_user_exists(user_id):
     """يتحقق مما إذا كان المستخدم موجوداً في جدول all_users."""
     if not db_pool: return False
@@ -415,7 +414,130 @@ async def show_initial_language_selection(update: Update, context: ContextTypes.
         protect_content=True
     )
 # --- (3) Admin Commands ---
-# ... (Admin commands remain the same) ...
+# (Moved to top of main body for correct definition order)
+async def sendid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("🚫 Access denied. This command is for the administrator only.", protect_content=True)
+        return
+    
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /sendid <Recipient_User_ID> <Your Message>", protect_content=True)
+        return
+    
+    try:
+        target_id = int(context.args[0])
+        message_to_send = " ".join(context.args[1:])
+        
+        await context.bot.send_message(
+            chat_id=target_id,
+            text=f"📢 **Admin Message:**\n\n{message_to_send}",
+            parse_mode='Markdown',
+            protect_content=True
+        )
+        
+        await update.message.reply_text(f"✅ Message sent successfully to User ID: {target_id}", protect_content=True)
+        
+    except BadRequest as e:
+        await update.message.reply_text(f"❌ Failed to send: User ID {target_id} is unreachable or invalid. Error: {e.message}", protect_content=True)
+    except Exception as e:
+        await update.message.reply_text(f"❌ An unexpected error occurred: {e}", protect_content=True)
+
+
+async def banuser_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("🚫 Access denied. Admin command only.", protect_content=True)
+        return
+
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /banuser <User_ID_to_Ban>", protect_content=True)
+        return
+    
+    try:
+        banned_id = int(context.args[0])
+        
+        async with db_pool.acquire() as connection:
+            await connection.execute(
+                "INSERT INTO global_bans (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+                banned_id
+            )
+        
+        await end_chat_in_db(banned_id)
+        await remove_from_wait_queue_db(banned_id)
+        
+        await update.message.reply_text(f"✅ User ID {banned_id} has been permanently blocked from using the chat features.", protect_content=True)
+        
+    except ValueError:
+        await update.message.reply_text("❌ Invalid ID format. Must be a number.", protect_content=True)
+    except Exception as e:
+        logger.error(f"Error banning user: {e}")
+        await update.message.reply_text(f"❌ An error occurred during the ban process: {e}", protect_content=True)
+
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    message = update.message
+    
+    if user_id != ADMIN_ID:
+        await message.reply_text("🚫 Access denied. This command is for the administrator only.", protect_content=True)
+        return
+
+    is_media_broadcast = message.photo or message.video or message.document
+    
+    if not is_media_broadcast and not context.args:
+        await message.reply_text(
+            "Usage:\n"
+            "1. For text: `/broadcast Your message here`\n"
+            "2. For media: Send the photo/video/document with `/broadcast` and your message in the caption.",
+            protect_content=True
+        )
+        return
+
+    all_users = await get_all_users()
+    
+    if not all_users:
+        await message.reply_text("No users found in the database to broadcast to.", protect_content=True)
+        return
+
+    success_count = 0
+    fail_count = 0
+    
+    await message.reply_text(f"Starting broadcast to {len(all_users)} users...", protect_content=True)
+    
+    for target_user_id in all_users:
+        try:
+            if is_media_broadcast:
+                await context.bot.copy_message(
+                    chat_id=target_user_id,
+                    from_chat_id=user_id,
+                    message_id=message.message_id
+                )
+            else:
+                message_to_send = " ".join(context.args)
+                await context.bot.send_message(
+                    chat_id=target_user_id, 
+                    text=message_to_send, 
+                    parse_mode=constants.ParseMode.MARKDOWN,
+                    protect_content=True
+                ) 
+            
+            success_count += 1
+        except Forbidden:
+            fail_count += 1
+            logger.warning(f"User {target_user_id} blocked the bot. Skipping.")
+        except Exception as e:
+            fail_count += 1
+            logger.error(f"Failed to send broadcast to {target_user_id}: {e}")
+            
+    await message.reply_text(
+        f"✅ **Broadcast complete!**\n"
+        f"Sent successfully to: {success_count} users.\n"
+        f"Failed (Bot blocked/Error): {fail_count} users.",
+        protect_content=True
+    )
 
 
 # --- (4) Bot Command Handlers (Main Logic) ---
@@ -615,7 +737,7 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await connection.execute("INSERT INTO waiting_queue (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
                 logger.info(f"User {user_id} added/remains in DB queue (via /next). Lang: {current_user_lang}")
 
-# --- (5) Report and Block Handlers ---
+# --- (5) Report and Block Handlers (Remains the same) ---
 
 async def block_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -707,7 +829,7 @@ async def handle_block_confirmation(update: Update, context: ContextTypes.DEFAUL
             except (Forbidden, BadRequest) as e:
                 logger.warning(f"Could not notify partner {reported_id} about chat end: {e}")
 
-# --- (7) Settings Handler ---
+# --- (7) Settings Handler (Remains the same) ---
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -870,7 +992,7 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"An unexpected error occurred sending from {sender_id} to {partner_id}: {e}")
 
-# --- Main Run Function ---
+# --- Main Run Function (The Fix) ---
 
 async def post_database_init(application: Application):
     if not await init_database():
@@ -891,48 +1013,48 @@ def main():
         .build()
     )
 
-    # --- معالجات الأزرار المضمنة (Inline Buttons) ---
+    # --- إضافة جميع المعالجات (Handlers) ---
+    
+    # (Fix) نقل دوال الأدمن إلى أعلى في الكود لحل مشكلة NameError، وتم إبقاؤها هنا في التسلسل المنطقي.
+    
+    # 1. معالجات الأزرار المضمنة (Inline Buttons)
     application.add_handler(CallbackQueryHandler(handle_join_check, pattern=r"^check_join_"))
     application.add_handler(CallbackQueryHandler(handle_block_confirmation, pattern=r"^confirm_block_|cancel_block_"))
-    
-    # (تعديل) لمعالجة اختيار اللغة الأولي والعادي
     application.add_handler(CallbackQueryHandler(handle_language_selection, pattern=r"^set_lang_|initial_set_lang_")) 
     
-    # --- أوامر الأدمن ---
+    # 2. أوامر الأدمن (الآن يجب أن تكون معرفة)
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CommandHandler("sendid", sendid_command)) 
     application.add_handler(CommandHandler("banuser", banuser_command))
     
-    # --- أوامر المستخدم ---
+    # 3. أوامر المستخدم
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("end", end_command))
     application.add_handler(CommandHandler("next", next_command))
     application.add_handler(CommandHandler("settings", settings_command))
     
-    # --- معالجات الأزرار النصية (Reply Buttons) ---
+    # 4. معالجات الأزرار النصية (Reply Buttons)
     button_patterns = []
     for lang in LANGUAGES.values():
-        button_patterns.append(lang['search_btn'])
-        button_patterns.append(lang['stop_btn'])
-        button_patterns.append(lang['next_btn'])
-        button_patterns.append(lang['block_btn'])
+        button_patterns.extend([lang['search_btn'], lang['stop_btn'], lang['next_btn'], lang['block_btn']])
         
-    application.add_handler(MessageHandler(filters.Text(button_patterns[0]), search_command)) # Search (en)
-    application.add_handler(MessageHandler(filters.Text(button_patterns[1]), end_command))   # Stop (en)
-    application.add_handler(MessageHandler(filters.Text(button_patterns[2]), next_command))   # Next (en)
-    application.add_handler(MessageHandler(filters.Text(button_patterns[3]), block_user_command)) # Block (en)
+    application.add_handler(MessageHandler(filters.Text(button_patterns[0]), search_command)) 
+    application.add_handler(MessageHandler(filters.Text(button_patterns[1]), end_command))   
+    application.add_handler(MessageHandler(filters.Text(button_patterns[2]), next_command))   
+    application.add_handler(MessageHandler(filters.Text(button_patterns[3]), block_user_command)) 
     
-    application.add_handler(MessageHandler(filters.Text(button_patterns[4]), search_command)) # Search (ar)
-    application.add_handler(MessageHandler(filters.Text(button_patterns[5]), end_command))   # Stop (ar)
-    application.add_handler(MessageHandler(filters.Text(button_patterns[6]), next_command))   # Next (ar)
-    application.add_handler(MessageHandler(filters.Text(button_patterns[7]), block_user_command)) # Block (ar)
+    application.add_handler(MessageHandler(filters.Text(button_patterns[4]), search_command)) 
+    application.add_handler(MessageHandler(filters.Text(button_patterns[5]), end_command))   
+    application.add_handler(MessageHandler(filters.Text(button_patterns[6]), next_command))   
+    application.add_handler(MessageHandler(filters.Text(button_patterns[7]), block_user_command)) 
 
-    application.add_handler(MessageHandler(filters.Text(button_patterns[8]), search_command)) # Search (es)
-    application.add_handler(MessageHandler(filters.Text(button_patterns[9]), end_command))   # Stop (es)
-    application.add_handler(MessageHandler(filters.Text(button_patterns[10]), next_command))   # Next (es)
-    application.add_handler(MessageHandler(filters.Text(button_patterns[11]), block_user_command)) # Block (es)
+    application.add_handler(MessageHandler(filters.Text(button_patterns[8]), search_command)) 
+    application.add_handler(MessageHandler(filters.Text(button_patterns[9]), end_command))   
+    application.add_handler(MessageHandler(filters.Text(button_patterns[10]), next_command))   
+    application.add_handler(MessageHandler(filters.Text(button_patterns[11]), block_user_command)) 
     
+    # 5. المعالج الرئيسي للرسائل (يجب أن يكون الأخير)
     all_button_texts = [item for sublist in [list(LANGUAGES[lang]['search_btn']), list(LANGUAGES[lang]['stop_btn']), list(LANGUAGES[lang]['next_btn']), list(LANGUAGES[lang]['block_btn'])] for lang in LANGUAGES for item in sublist]
     
     application.add_handler(MessageHandler(
