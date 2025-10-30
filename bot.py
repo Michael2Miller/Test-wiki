@@ -1,7 +1,9 @@
 import os
 import asyncio
-import asyncpg
+import asyncpg 
 import logging
+# (FIX) استيراد Union من مكتبة typing لضمان التوافق مع إصدارات بايثون الأقدم من 3.10
+from typing import Union 
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup, constants
 from telegram.error import BadRequest, Forbidden
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
@@ -58,7 +60,7 @@ LANGUAGES = {
         'settings_text': "🌐 **Language Settings**\n\nSelect your preferred language for the bot's interface and for matching partners:",
         'settings_saved': "✅ Language updated to {lang_name}. Press /start to see the changes.",
         'admin_denied': "🚫 Access denied. This command is for the administrator only.",
-        'globally_banned': "🚫 Your access to this bot has been permanently suspended.",
+        'globally_banned': "🚫 Your access to this bot has been suspended permanently.",
         'next_not_in_chat': "🔎 Searching for a partner... Please wait.",
         'block_not_in_chat': "You are not currently in a chat to block anyone.",
         'block_while_searching': "You cannot block anyone while searching. Use 'Stop ⏹️' first.",
@@ -337,7 +339,8 @@ async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -
         logger.error(f"Unexpected error checking membership for {user_id} in {CHANNEL_ID}: {e}")
         return False
 
-async def send_join_channel_message(update_or_query: Update.message | Update.callback_query, context: ContextTypes.DEFAULT_TYPE, lang_code: str):
+# (FIX) استخدام Union بدلاً من العلامة |
+async def send_join_channel_message(update_or_query: Union[Update, Update.callback_query], context: ContextTypes.DEFAULT_TYPE, lang_code: str):
     """ترسل رسالة الاشتراك الإجباري."""
     
     join_text = _('join_channel_msg', lang_code)
@@ -351,10 +354,16 @@ async def send_join_channel_message(update_or_query: Update.message | Update.cal
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    if hasattr(update_or_query, 'message') and update_or_query.message:
+    # تحديد وظيفة الإرسال: إما edit_message_text (للكولباك) أو reply_text (للرسالة العادية)
+    if isinstance(update_or_query, Update): # رسالة عادية (مثل /start)
         sender = update_or_query.message.reply_text
-    elif hasattr(update_or_query, 'edit_message_text'):
-        # For sending after initial language selection (from callback query)
+        await sender(
+            join_text,
+            reply_markup=reply_markup,
+            parse_mode=constants.ParseMode.MARKDOWN_V2,
+            protect_content=True
+        )
+    elif isinstance(update_or_query, Update.callback_query): # استجابة من زر (بعد اختيار اللغة)
         await update_or_query.edit_message_text(
             join_text,
             reply_markup=reply_markup,
@@ -365,12 +374,6 @@ async def send_join_channel_message(update_or_query: Update.message | Update.cal
     else:
         return
         
-    await sender(
-        join_text,
-        reply_markup=reply_markup,
-        parse_mode=constants.ParseMode.MARKDOWN_V2,
-        protect_content=True
-    )
 
 async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """يعالج ضغطة زر '✅ I have joined' للتحقق من الاشتراك."""
@@ -453,11 +456,256 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             protect_content=True
         )
 
-# ... (search_command, end_command, next_command remain the same) ...
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    
+    if await is_user_globally_banned(user_id):
+        await update.message.reply_text(_('globally_banned', DEFAULT_LANG), protect_content=True)
+        return
+    
+    lang_code = await get_user_language(user_id)
+    keyboard = await get_keyboard(lang_code)
 
+    if not await is_user_subscribed(user_id, context):
+        await send_join_channel_message(update, context, lang_code)
+        return
+    if await get_partner_from_db(user_id):
+        await update.message.reply_text(_('search_already_in_chat', lang_code), protect_content=True)
+        return
+    if await is_user_waiting_db(user_id):
+        await update.message.reply_text(_('search_already_searching', lang_code), protect_content=True)
+        return
+    
+    # --- (تعديل استعلام البحث لاستبعاد المحظورين والمطابقة باللغة) ---
+    async with db_pool.acquire() as connection:
+        async with connection.transaction():
+            # (1) جلب لغة المستخدم الحالي
+            current_user_lang = await get_user_language(user_id) 
+            
+            # (2) البحث مع شرط JOIN على جدول all_users للمطابقة حسب اللغة
+            partner_id = await connection.fetchval(
+                """
+                DELETE FROM waiting_queue
+                WHERE user_id = (
+                    SELECT w.user_id 
+                    FROM waiting_queue w
+                    JOIN all_users au ON w.user_id = au.user_id -- (NEW) للوصول إلى اللغة
+                    WHERE w.user_id != $1 
+                      AND au.language = $2 -- (NEW) شرط المطابقة باللغة
+                      AND w.user_id NOT IN (SELECT blocked_id FROM user_blocks WHERE blocker_id = $1)
+                      AND $1 NOT IN (SELECT blocked_id FROM user_blocks WHERE blocker_id = w.user_id)
+                      AND w.user_id NOT IN (SELECT user_id FROM global_bans)
+                    ORDER BY w.timestamp ASC LIMIT 1
+                )
+                RETURNING user_id
+                """, user_id, current_user_lang
+            )
+            # ----------------------------------------------------
+            
+            if partner_id:
+                await connection.execute("INSERT INTO active_chats (user_id, partner_id) VALUES ($1, $2), ($2, $1)", user_id, partner_id)
+                logger.info(f"Match found! {user_id} <-> {partner_id}. Lang: {current_user_lang}")
+                
+                # إرسال الرسائل باللغة المناسبة
+                partner_lang = await get_user_language(partner_id)
+                await context.bot.send_message(chat_id=user_id, text=_('partner_found', lang_code), reply_markup=keyboard, protect_content=True)
+                await context.bot.send_message(chat_id=partner_id, text=_('partner_found', partner_lang), reply_markup=await get_keyboard(partner_lang), protect_content=True)
+            else:
+                await connection.execute("INSERT INTO waiting_queue (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
+                await update.message.reply_text(_('search_wait', lang_code), protect_content=True)
+                logger.info(f"User {user_id} added to DB queue. Lang: {current_user_lang}")
+
+async def end_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    
+    if await is_user_globally_banned(user_id):
+        await update.message.reply_text(_('globally_banned', DEFAULT_LANG), protect_content=True)
+        return
+
+    lang_code = await get_user_language(user_id)
+    keyboard = await get_keyboard(lang_code)
+
+    if not await is_user_subscribed(user_id, context):
+        await send_join_channel_message(update, context, lang_code)
+        return
+        
+    partner_id = await end_chat_in_db(user_id)
+    
+    if partner_id:
+        logger.info(f"Chat ended by {user_id}. Partner was {partner_id}.")
+        await context.bot.send_message(chat_id=user_id, text=_('end_msg_user', lang_code), reply_markup=keyboard, protect_content=True)
+        try:
+            partner_lang = await get_user_language(partner_id)
+            await context.bot.send_message(chat_id=partner_id, text=_('end_msg_partner', partner_lang), reply_markup=await get_keyboard(partner_lang), protect_content=True)
+        except (Forbidden, BadRequest) as e:
+             logger.warning(f"Could not notify partner {partner_id} about chat end: {e}")
+    elif await is_user_waiting_db(user_id):
+        await remove_from_wait_queue_db(user_id)
+        logger.info(f"User {user_id} cancelled search.")
+        await update.message.reply_text(_('end_search_cancel', lang_code), reply_markup=keyboard, protect_content=True)
+    else:
+        await update.message.reply_text(_('end_not_in_chat', lang_code), reply_markup=keyboard, protect_content=True)
+
+async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    
+    if await is_user_globally_banned(user_id):
+        await update.message.reply_text(_('globally_banned', DEFAULT_LANG), protect_content=True)
+        return
+
+    lang_code = await get_user_language(user_id)
+    keyboard = await get_keyboard(lang_code)
+
+    if not await is_user_subscribed(user_id, context):
+        await send_join_channel_message(update, context, lang_code)
+        return
+        
+    # --- 1. End Chat Logic ---
+    partner_id = await end_chat_in_db(user_id)
+    
+    if partner_id:
+        logger.info(f"Chat ended by {user_id} (via /next). Partner was {partner_id}.")
+        await context.bot.send_message(chat_id=user_id, text=_('next_msg_user', lang_code), protect_content=True)
+        try:
+            partner_lang = await get_user_language(partner_id)
+            await context.bot.send_message(chat_id=partner_id, text=_('end_msg_partner', partner_lang), reply_markup=await get_keyboard(partner_lang), protect_content=True)
+        except (Forbidden, BadRequest) as e:
+            logger.warning(f"Could not notify partner {partner_id} about chat end: {e}")
+    elif await is_user_waiting_db(user_id):
+        await update.message.reply_text(_('next_already_searching', lang_code), protect_content=True)
+        return
+    else:
+        await update.message.reply_text(_('next_not_in_chat', lang_code), protect_content=True)
+
+    # --- 2. Search Logic (Matching with Language Filter) ---
+    async with db_pool.acquire() as connection:
+        async with connection.transaction():
+            # (1) جلب لغة المستخدم الحالي
+            current_user_lang = await get_user_language(user_id)
+            
+            # (2) البحث مع شرط JOIN على جدول all_users للمطابقة حسب اللغة
+            partner_id_new = await connection.fetchval(
+                """
+                DELETE FROM waiting_queue
+                WHERE user_id = (
+                    SELECT w.user_id 
+                    FROM waiting_queue w
+                    JOIN all_users au ON w.user_id = au.user_id -- (NEW) للوصول إلى اللغة
+                    WHERE w.user_id != $1 
+                      AND au.language = $2 -- (NEW) شرط المطابقة باللغة
+                      AND w.user_id NOT IN (SELECT blocked_id FROM user_blocks WHERE blocker_id = $1)
+                      AND $1 NOT IN (SELECT blocked_id FROM user_blocks WHERE blocker_id = w.user_id)
+                      AND w.user_id NOT IN (SELECT user_id FROM global_bans)
+                    ORDER BY w.timestamp ASC LIMIT 1
+                )
+                RETURNING user_id
+                """, user_id, current_user_lang
+            )
+            # ----------------------------------------------------
+            
+            if partner_id_new:
+                await connection.execute("INSERT INTO active_chats (user_id, partner_id) VALUES ($1, $2), ($2, $1)", user_id, partner_id_new)
+                logger.info(f"Match found! {user_id} <-> {partner_id_new}. Lang: {current_user_lang}")
+                
+                # إرسال الرسائل باللغة المناسبة
+                partner_lang = await get_user_language(partner_id_new)
+                await context.bot.send_message(chat_id=user_id, text=_('partner_found', lang_code), reply_markup=keyboard, protect_content=True)
+                await context.bot.send_message(chat_id=partner_id_new, text=_('partner_found', partner_lang), reply_markup=await get_keyboard(partner_lang), protect_content=True)
+            else:
+                await connection.execute("INSERT INTO waiting_queue (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
+                logger.info(f"User {user_id} added/remains in DB queue (via /next). Lang: {current_user_lang}")
 
 # --- (5) Report and Block Handlers ---
-# ... (block_user_command and handle_block_confirmation remain the same) ...
+
+async def block_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    
+    if await is_user_globally_banned(user_id):
+        await update.message.reply_text(_('globally_banned', DEFAULT_LANG), protect_content=True)
+        return
+
+    lang_code = await get_user_language(user_id)
+    keyboard = await get_keyboard(lang_code)
+
+    if not await is_user_subscribed(user_id, context):
+        await send_join_channel_message(update, context, lang_code)
+        return
+
+    reported_id = await get_partner_from_db(user_id)
+    
+    if not reported_id:
+        if await is_user_waiting_db(user_id):
+            await update.message.reply_text(_('block_while_searching', lang_code), protect_content=True)
+        else:
+            await update.message.reply_text(_('block_not_in_chat', lang_code), reply_markup=keyboard, protect_content=True)
+        return
+    
+    # 1. إرسال رسالة التأكيد مع الأزرار المضمنة
+    confirmation_markup, confirm_text = await get_confirmation_keyboard(reported_id, lang_code)
+    
+    await update.message.reply_text(
+        confirm_text,
+        reply_markup=confirmation_markup,
+        parse_mode=constants.ParseMode.MARKDOWN,
+        protect_content=True
+    )
+
+async def handle_block_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    data = query.data
+    
+    # استخراج اللغة من الـ Callback Data
+    parts = data.split('_')
+    lang_code = parts[-1] if len(parts) > 2 else DEFAULT_LANG
+    
+    await query.answer()
+    keyboard = await get_keyboard(lang_code)
+    
+    if data.startswith("cancel_block_"):
+        await query.edit_message_text(_('block_cancelled', lang_code))
+        return
+
+    if data.startswith("confirm_block_"):
+        # 1. استخراج ID المُبلغ عنه
+        reported_id = int(parts[2])
+        
+        # 2. تسجيل الحظر (يسجل الحظر في قاعدة البيانات)
+        await add_user_block(user_id, reported_id) 
+        
+        # 3. إرسال التقرير المفصل إلى الأدمن (LOG_CHANNEL_ID)
+        if LOG_CHANNEL_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=LOG_CHANNEL_ID,
+                    text=f"🚨 **NEW REPORT RECEIVED (Chat Blocked)** 🚨\n\n"
+                         f"**Reported User ID (Blocked):** `{reported_id}`\n"
+                         f"**Reporter User ID (Blocker):** `{user_id}`\n\n"
+                         f"**Action:** User {user_id} permanently blocked {reported_id}.",
+                    parse_mode=constants.ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                logger.error(f"Failed to process report for {reported_id}: {e}")
+
+        # 4. إنهاء المحادثة لكلا الطرفين
+        partner_id = await end_chat_in_db(user_id)
+        
+        # 5. إرسال رسالة التأكيد للمستخدم (المُبلِّغ)
+        await query.edit_message_text(
+            _('block_success', lang_code),
+            reply_markup=None, # إزالة أزرار التأكيد
+            protect_content=True
+        )
+        await query.message.reply_text(_('use_buttons_msg', lang_code), reply_markup=keyboard, protect_content=True)
+        
+        # 6. إخطار الشريك المُبلغ عنه (إذا أمكن)
+        if reported_id:
+            logger.info(f"Chat ended by {user_id} (via Block & Report). Partner was {reported_id}.")
+            try:
+                partner_lang = await get_user_language(reported_id)
+                await context.bot.send_message(chat_id=reported_id, text=_('end_msg_partner', partner_lang), reply_markup=await get_keyboard(partner_lang), protect_content=True)
+            except (Forbidden, BadRequest) as e:
+                logger.warning(f"Could not notify partner {reported_id} about chat end: {e}")
 
 # --- (7) Settings Handler ---
 
@@ -573,7 +821,6 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     # --- Step 1: Log the message (الأرشفة أولاً - Log-Before-Filter) ---
-    # ... (Rest of the relay_and_log_message remains the same) ...
     if LOG_CHANNEL_ID:
         try:
             log_caption_md = f"Msg from: `{sender_id}`\nTo partner: `{partner_id}`\n\n{message.caption or ''}"
@@ -652,7 +899,9 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_language_selection, pattern=r"^set_lang_|initial_set_lang_")) 
     
     # --- أوامر الأدمن ---
-    # ... (Admin handlers remain the same) ...
+    application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("sendid", sendid_command)) 
+    application.add_handler(CommandHandler("banuser", banuser_command))
     
     # --- أوامر المستخدم ---
     application.add_handler(CommandHandler("start", start_command))
