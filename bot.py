@@ -1013,8 +1013,7 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
             await message.reply_text("Sorry, your message failed to send. (Your partner might be temporarily unreachable).", protect_content=True)
     except Exception as e:
         logger.error(f"An unexpected error occurred sending from {sender_id} to {partner_id}: {e}")
-
-# --- (10) Main Run Function ---
+# --- (10) Main Run Function (تم تعديلها بالكامل لحل مشكلة بث الوسائط) ---
 
 async def post_database_init(application: Application):
     if not await init_database():
@@ -1035,27 +1034,38 @@ def main():
         .build()
     )
 
-    # 1. معالجات الأزرار المضمنة (Inline Buttons)
+    # --- (جديد) تحديد أولويات المعالجات (Groups) ---
+    # (الأولوية 1: أوامر الأدمن)
+    # (الأولوية 2: أوامر المستخدم)
+    # (الأولوية 3: الأزرار النصية)
+    # (الأولوية 4: معالج الرسائل العام)
+    # ----------------------------------------------------
+
+    # 1. معالجات الأزرار المضمنة (Inline Buttons) - (تعمل دائماً بشكل مستقل)
     application.add_handler(CallbackQueryHandler(handle_join_check, pattern=r"^check_join_"), group=2)
     application.add_handler(CallbackQueryHandler(handle_block_confirmation, pattern=r"^confirm_block_|^cancel_block_"), group=2)
     application.add_handler(CallbackQueryHandler(handle_language_selection, pattern=r"^set_lang_|initial_set_lang_"), group=2) 
     
-    # 2. أوامر الأدمن
+    # 2. أوامر الأدمن (الأولوية 1)
+    
+    # --- (التعديل الأهم: دمج معالج البث للنص والتعليقات) ---
     application.add_handler(MessageHandler(
         (filters.COMMAND | filters.CAPTION) & filters.Regex(r'^/broadcast'), 
         broadcast_command
     ), group=1)
+    # -----------------------------------------------------
+    
     application.add_handler(CommandHandler("sendid", sendid_command), group=1) 
     application.add_handler(CommandHandler("banuser", banuser_command), group=1)
     
-    # 3. أوامر المستخدم
+    # 3. أوامر المستخدم (الأولوية 2)
     application.add_handler(CommandHandler("start", start_command), group=3)
     application.add_handler(CommandHandler("search", search_command), group=3)
     application.add_handler(CommandHandler("end", end_command), group=3)
     application.add_handler(CommandHandler("next", next_command), group=3)
     application.add_handler(CommandHandler("settings", settings_command), group=3)
     
-    # 4. معالجات الأزرار النصية (Reply Buttons)
+    # 4. معالجات الأزرار النصية (Reply Buttons) (الأولوية 3)
     
     search_texts = [lang['search_btn'] for lang in LANGUAGES.values()]
     stop_texts = [lang['stop_btn'] for lang in LANGUAGES.values()]
@@ -1067,11 +1077,13 @@ def main():
     application.add_handler(MessageHandler(filters.Text(next_texts), next_command), group=4)   
     application.add_handler(MessageHandler(filters.Text(block_texts), block_user_command), group=4) 
     
-    # 5. المعالج الرئيسي للرسائل (يجب أن يكون الأخير)
+    # 5. المعالج الرئيسي للرسائل (الأولوية 4 - الأخير)
     all_button_texts = search_texts + stop_texts + next_texts + block_texts
     
     application.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & ~filters.COMMAND & ~filters.Text(all_button_texts),
+        filters.ChatType.PRIVATE & 
+        ~filters.COMMAND & 
+        ~filters.Text(all_button_texts),
         relay_and_log_message
     ), group=5)
 
