@@ -12,6 +12,7 @@ import re
 try:
     TELEGRAM_TOKEN = os.environ['BOT_TOKEN']
     DATABASE_URL = os.environ['DATABASE_URL']
+    # (مهم) التأكد من أن ADMIN_ID هو عدد صحيح (Integer)
     ADMIN_ID = int(os.environ['ADMIN_ID']) 
     CHANNEL_ID = os.environ['CHANNEL_ID']
     CHANNEL_INVITE_LINK = os.environ['CHANNEL_INVITE_LINK']
@@ -28,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- (NEW) Translation Dictionaries (Remains the same) ---
+# --- (1) Translation Dictionaries and Helpers ---
 LANGUAGES = {
     'en': {
         'language_name': "English 🇬🇧",
@@ -161,10 +162,10 @@ LANGUAGES = {
 DEFAULT_LANG = 'en'
 SUPPORTED_LANGUAGES = ['en', 'ar', 'es']
 
-# --- (NEW) Translation and Utilities ---
+# --- (2) Utility Functions (Helpers) ---
 
 async def get_user_language(user_id):
-    """(جديد) يجلب كود لغة المستخدم من قاعدة البيانات."""
+    """يجلب كود لغة المستخدم من قاعدة البيانات."""
     if not db_pool: return DEFAULT_LANG
     try:
         async with db_pool.acquire() as connection:
@@ -175,11 +176,11 @@ async def get_user_language(user_id):
         return DEFAULT_LANG
 
 def _(key, lang_code):
-    """(جديد) دالة الترجمة. تسترجع الرسالة المناسبة باللغة المطلوبة."""
+    """دالة الترجمة. تسترجع الرسالة المناسبة باللغة المطلوبة."""
     return LANGUAGES.get(lang_code, LANGUAGES[DEFAULT_LANG]).get(key, LANGUAGES[DEFAULT_LANG].get(key, 'MISSING TRANSLATION'))
 
 async def get_keyboard(lang_code):
-    """(جديد) تنشئ لوحة المفاتيح بناءً على اللغة."""
+    """تنشئ لوحة المفاتيح بناءً على اللغة."""
     keyboard_buttons = [
         [
             _(f'search_btn', lang_code), 
@@ -192,16 +193,16 @@ async def get_keyboard(lang_code):
     ]
     return ReplyKeyboardMarkup(keyboard_buttons, resize_keyboard=True)
 
-# --- NEW: URL and Username Pattern Definition (Remains the same) ---
+# --- NEW: URL and Username Pattern Definition ---
 URL_PATTERN = re.compile(
     r'(https?://|www\.|t\.me/|t\.co/|telegram\.me/|telegram\.dog/)'
     r'[\w\.-]+(\.[\w\.-]+)*([\w\-\._~:/\?#\[\]@!$&\'()*+,;=])*',
     re.IGNORECASE
 )
 
-# --- Define Confirmation Keyboard (Remains the same) ---
+# --- Define Confirmation Keyboard ---
 async def get_confirmation_keyboard(reported_id, lang_code):
-    """(جديد) لوحة تأكيد الحظر بناءً على اللغة."""
+    """لوحة تأكيد الحظر بناءً على اللغة."""
     confirm_text = _('block_confirm_text', lang_code)
     keyboard = [
         [InlineKeyboardButton("✅ " + _('block_btn', lang_code), callback_data=f"confirm_block_{reported_id}_{lang_code}")],
@@ -209,10 +210,10 @@ async def get_confirmation_keyboard(reported_id, lang_code):
     ]
     return InlineKeyboardMarkup(keyboard), confirm_text
 
-# --- (1) Database Helper Functions (Remains the same) ---
+# --- (3) Database Helper Functions ---
 
 async def is_user_globally_banned(user_id):
-    """(جديد) يتحقق مما إذا كان المستخدم محظوراً بشكل شامل."""
+    """يتحقق مما إذا كان المستخدم محظوراً بشكل شامل."""
     if not db_pool: return False
     async with db_pool.acquire() as connection:
         return await connection.fetchval("SELECT 1 FROM global_bans WHERE user_id = $1", user_id) is not None
@@ -238,7 +239,6 @@ async def init_database():
                     timestamp TIMESTAMPTZ DEFAULT (NOW() AT TIME ZONE 'UTC')
                 );
             ''')
-            # (NEW) تم تغيير اللغة الافتراضية إلى 'en' في حال عدم تعيينها سابقاً
             await connection.execute('''
                 CREATE TABLE IF NOT EXISTS all_users (
                     user_id BIGINT PRIMARY KEY,
@@ -263,7 +263,6 @@ async def init_database():
         logger.critical(f"CRITICAL: Failed to connect to database: {e}")
         return False
 
-# --- (NEW) Database Check Function (Remains the same) ---
 async def check_if_user_exists(user_id):
     """يتحقق مما إذا كان المستخدم موجوداً في جدول all_users."""
     if not db_pool: return False
@@ -321,100 +320,8 @@ async def add_user_block(blocker_id, blocked_id):
             blocker_id, blocked_id
         )
 
-# --- (2) Global Helper Functions (Subscribe, Join Check) ---
+# --- (4) Admin Command Handlers (Moved up) ---
 
-async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """تتحقق مما إذا كان المستخدم عضواً في القناة."""
-    try:
-        member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        return member.status in ['member', 'administrator', 'creator']
-    except BadRequest as e:
-        if "user not found" in e.message:
-            logger.warning(f"User {user_id} not found in channel {CHANNEL_ID}, likely not joined.")
-        else:
-            logger.error(f"Error checking channel membership for {user_id} in {CHANNEL_ID}: {e}")
-        return False
-    except Exception as e:
-        logger.error(f"Unexpected error checking membership for {user_id} in {CHANNEL_ID}: {e}")
-        return False
-
-# (FIX) استخدام Union بدلاً من العلامة |
-async def send_join_channel_message(update_or_query: Union[Update, Update.callback_query], context: ContextTypes.DEFAULT_TYPE, lang_code: str):
-    """ترسل رسالة الاشتراك الإجباري."""
-    
-    join_text = _('join_channel_msg', lang_code)
-    join_btn_text = _('join_channel_btn', lang_code)
-    
-    keyboard = [
-        [
-            InlineKeyboardButton(join_btn_text, url=CHANNEL_INVITE_LINK),
-            InlineKeyboardButton("✅ " + _('joined_success', lang_code).split(' ')[1], callback_data=f"check_join_{lang_code}")
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    # تحديد وظيفة الإرسال: إما edit_message_text (للكولباك) أو reply_text (للرسالة العادية)
-    if isinstance(update_or_query, Update): # رسالة عادية (مثل /start)
-        sender = update_or_query.message.reply_text
-        await sender(
-            join_text,
-            reply_markup=reply_markup,
-            parse_mode=constants.ParseMode.MARKDOWN_V2,
-            protect_content=True
-        )
-    elif isinstance(update_or_query, Update.callback_query): # استجابة من زر (بعد اختيار اللغة)
-        await update_or_query.edit_message_text(
-            join_text,
-            reply_markup=reply_markup,
-            parse_mode=constants.ParseMode.MARKDOWN_V2,
-            protect_content=True
-        )
-        return
-    else:
-        return
-        
-
-async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يعالج ضغطة زر '✅ I have joined' للتحقق من الاشتراك."""
-    query = update.callback_query
-    user_id = query.from_user.id
-    lang_code = query.data.split('_')[2] if len(query.data.split('_')) > 2 else DEFAULT_LANG
-    
-    await query.answer(_('joined_success', lang_code).split(' ')[1])
-    
-    if await is_user_subscribed(user_id, context):
-        await query.edit_message_text(
-            _('joined_success', lang_code),
-            reply_markup=None, 
-            parse_mode=constants.ParseMode.MARKDOWN_V2
-        )
-        await query.message.reply_text(_('use_buttons_msg', lang_code), reply_markup=await get_keyboard(lang_code), protect_content=True)
-    else:
-        await query.answer(_('join_channel_btn', lang_code), show_alert=True)
-
-
-# --- (NEW) Initial Language Selection Function ---
-async def show_initial_language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يعرض واجهة اختيار اللغة الأولية للمستخدمين الجدد."""
-    
-    # 1. Build language selection Inline Keyboard
-    language_buttons = []
-    for code in SUPPORTED_LANGUAGES:
-        name = LANGUAGES[code]['language_name']
-        # استخدام callback data خاص للإعداد الأولي
-        language_buttons.append([InlineKeyboardButton(name, callback_data=f"initial_set_lang_{code}")])
-        
-    reply_markup = InlineKeyboardMarkup(language_buttons)
-    
-    # 2. Send the message (باللغة الإنجليزية الافتراضية)
-    await update.message.reply_text(
-        _('initial_selection_msg', DEFAULT_LANG),
-        reply_markup=reply_markup,
-        parse_mode=constants.ParseMode.MARKDOWN,
-        protect_content=True
-    )
-# --- (3) Admin Commands ---
-# (Moved to top of main body for correct definition order)
 async def sendid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     
@@ -539,8 +446,99 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         protect_content=True
     )
 
+# --- (5) Subscription Handlers ---
 
-# --- (4) Bot Command Handlers (Main Logic) ---
+async def is_user_subscribed(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """تتحقق مما إذا كان المستخدم عضواً في القناة."""
+    try:
+        member = await context.bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        return member.status in ['member', 'administrator', 'creator']
+    except BadRequest as e:
+        if "user not found" in e.message:
+            logger.warning(f"User {user_id} not found in channel {CHANNEL_ID}, likely not joined.")
+        else:
+            logger.error(f"Error checking channel membership for {user_id} in {CHANNEL_ID}: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Unexpected error checking membership for {user_id} in {CHANNEL_ID}: {e}")
+        return False
+
+# (FIX) استخدام Union بدلاً من العلامة |
+async def send_join_channel_message(update_or_query: Union[Update, Update.callback_query], context: ContextTypes.DEFAULT_TYPE, lang_code: str):
+    """ترسل رسالة الاشتراك الإجباري."""
+    
+    join_text = _('join_channel_msg', lang_code)
+    join_btn_text = _('join_channel_btn', lang_code)
+    
+    keyboard = [
+        [
+            InlineKeyboardButton(join_btn_text, url=CHANNEL_INVITE_LINK),
+            InlineKeyboardButton("✅ " + _('joined_success', lang_code).split(' ')[1], callback_data=f"check_join_{lang_code}")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # تحديد وظيفة الإرسال: إما edit_message_text (للكولباك) أو reply_text (للرسالة العادية)
+    if isinstance(update_or_query, Update): # رسالة عادية (مثل /start)
+        sender = update_or_query.message.reply_text
+        await sender(
+            join_text,
+            reply_markup=reply_markup,
+            parse_mode=constants.ParseMode.MARKDOWN_V2,
+            protect_content=True
+        )
+    elif isinstance(update_or_query, Update.callback_query): # استجابة من زر (بعد اختيار اللغة)
+        await update_or_query.edit_message_text(
+            join_text,
+            reply_markup=reply_markup,
+            parse_mode=constants.ParseMode.MARKDOWN_V2,
+            protect_content=True
+        )
+        return
+    else:
+        return
+        
+
+async def handle_join_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعالج ضغطة زر '✅ I have joined' للتحقق من الاشتراك."""
+    query = update.callback_query
+    user_id = query.from_user.id
+    lang_code = query.data.split('_')[2] if len(query.data.split('_')) > 2 else DEFAULT_LANG
+    
+    await query.answer(_('joined_success', lang_code).split(' ')[1])
+    
+    if await is_user_subscribed(user_id, context):
+        await query.edit_message_text(
+            _('joined_success', lang_code),
+            reply_markup=None, 
+            parse_mode=constants.ParseMode.MARKDOWN_V2
+        )
+        await query.message.reply_text(_('use_buttons_msg', lang_code), reply_markup=await get_keyboard(lang_code), protect_content=True)
+    else:
+        await query.answer(_('join_channel_btn', lang_code), show_alert=True)
+
+
+async def show_initial_language_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعرض واجهة اختيار اللغة الأولية للمستخدمين الجدد."""
+    
+    # 1. Build language selection Inline Keyboard
+    language_buttons = []
+    for code in SUPPORTED_LANGUAGES:
+        name = LANGUAGES[code]['language_name']
+        # استخدام callback data خاص للإعداد الأولي
+        language_buttons.append([InlineKeyboardButton(name, callback_data=f"initial_set_lang_{code}")])
+        
+    reply_markup = InlineKeyboardMarkup(language_buttons)
+    
+    # 2. Send the message (باللغة الإنجليزية الافتراضية)
+    await update.message.reply_text(
+        _('initial_selection_msg', DEFAULT_LANG),
+        reply_markup=reply_markup,
+        parse_mode=constants.ParseMode.MARKDOWN,
+        protect_content=True
+    )
+
+# --- (6) Main Bot Handlers (User Commands) ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -737,7 +735,7 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await connection.execute("INSERT INTO waiting_queue (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
                 logger.info(f"User {user_id} added/remains in DB queue (via /next). Lang: {current_user_lang}")
 
-# --- (5) Report and Block Handlers (Remains the same) ---
+# --- (7) Reporting and Block Handlers ---
 
 async def block_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -829,7 +827,7 @@ async def handle_block_confirmation(update: Update, context: ContextTypes.DEFAUL
             except (Forbidden, BadRequest) as e:
                 logger.warning(f"Could not notify partner {reported_id} about chat end: {e}")
 
-# --- (7) Settings Handler (Remains the same) ---
+# --- (8) Settings Handler ---
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -918,7 +916,7 @@ async def handle_language_selection(update: Update, context: ContextTypes.DEFAUL
             await query.answer("An error occurred while saving your preference.")
 
 
-# --- (6) Relay Message Handler (Final) ---
+# --- (9) Relay Message Handler (Final) ---
 
 async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sender_id = update.message.from_user.id
@@ -928,7 +926,6 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(_('globally_banned', DEFAULT_LANG), protect_content=True)
         return
     
-    # (NEW) لا حاجة لإضافة المستخدم هنا، فقط الحصول على اللغة
     # يتم إضافة المستخدم وتعيين اللغة في start_command أو في callback اللغة
     lang_code = await get_user_language(sender_id) 
     
@@ -992,7 +989,7 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"An unexpected error occurred sending from {sender_id} to {partner_id}: {e}")
 
-# --- Main Run Function (The Fix) ---
+# --- (10) Main Run Function (The Fix) ---
 
 async def post_database_init(application: Application):
     if not await init_database():
@@ -1015,14 +1012,12 @@ def main():
 
     # --- إضافة جميع المعالجات (Handlers) ---
     
-    # (Fix) نقل دوال الأدمن إلى أعلى في الكود لحل مشكلة NameError، وتم إبقاؤها هنا في التسلسل المنطقي.
-    
     # 1. معالجات الأزرار المضمنة (Inline Buttons)
     application.add_handler(CallbackQueryHandler(handle_join_check, pattern=r"^check_join_"))
     application.add_handler(CallbackQueryHandler(handle_block_confirmation, pattern=r"^confirm_block_|cancel_block_"))
     application.add_handler(CallbackQueryHandler(handle_language_selection, pattern=r"^set_lang_|initial_set_lang_")) 
     
-    # 2. أوامر الأدمن (الآن يجب أن تكون معرفة)
+    # 2. أوامر الأدمن
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CommandHandler("sendid", sendid_command)) 
     application.add_handler(CommandHandler("banuser", banuser_command))
@@ -1039,20 +1034,20 @@ def main():
     for lang in LANGUAGES.values():
         button_patterns.extend([lang['search_btn'], lang['stop_btn'], lang['next_btn'], lang['block_btn']])
         
-    application.add_handler(MessageHandler(filters.Text(button_patterns[0]), search_command)) 
-    application.add_handler(MessageHandler(filters.Text(button_patterns[1]), end_command))   
-    application.add_handler(MessageHandler(filters.Text(button_patterns[2]), next_command))   
-    application.add_handler(MessageHandler(filters.Text(button_patterns[3]), block_user_command)) 
+    application.add_handler(MessageHandler(filters.Text(button_patterns[0]), search_command)) # Search (en)
+    application.add_handler(MessageHandler(filters.Text(button_patterns[1]), end_command))   # Stop (en)
+    application.add_handler(MessageHandler(filters.Text(button_patterns[2]), next_command))   # Next (en)
+    application.add_handler(MessageHandler(filters.Text(button_patterns[3]), block_user_command)) # Block (en)
     
-    application.add_handler(MessageHandler(filters.Text(button_patterns[4]), search_command)) 
-    application.add_handler(MessageHandler(filters.Text(button_patterns[5]), end_command))   
-    application.add_handler(MessageHandler(filters.Text(button_patterns[6]), next_command))   
-    application.add_handler(MessageHandler(filters.Text(button_patterns[7]), block_user_command)) 
+    application.add_handler(MessageHandler(filters.Text(button_patterns[4]), search_command)) # Search (ar)
+    application.add_handler(MessageHandler(filters.Text(button_patterns[5]), end_command))   # Stop (ar)
+    application.add_handler(MessageHandler(filters.Text(button_patterns[6]), next_command))   # Next (ar)
+    application.add_handler(MessageHandler(filters.Text(button_patterns[7]), block_user_command)) # Block (ar)
 
-    application.add_handler(MessageHandler(filters.Text(button_patterns[8]), search_command)) 
-    application.add_handler(MessageHandler(filters.Text(button_patterns[9]), end_command))   
-    application.add_handler(MessageHandler(filters.Text(button_patterns[10]), next_command))   
-    application.add_handler(MessageHandler(filters.Text(button_patterns[11]), block_user_command)) 
+    application.add_handler(MessageHandler(filters.Text(button_patterns[8]), search_command)) # Search (es)
+    application.add_handler(MessageHandler(filters.Text(button_patterns[9]), end_command))   # Stop (es)
+    application.add_handler(MessageHandler(filters.Text(button_patterns[10]), next_command))   # Next (es)
+    application.add_handler(MessageHandler(filters.Text(button_patterns[11]), block_user_command)) # Block (es)
     
     # 5. المعالج الرئيسي للرسائل (يجب أن يكون الأخير)
     all_button_texts = [item for sublist in [list(LANGUAGES[lang]['search_btn']), list(LANGUAGES[lang]['stop_btn']), list(LANGUAGES[lang]['next_btn']), list(LANGUAGES[lang]['block_btn'])] for lang in LANGUAGES for item in sublist]
