@@ -7,6 +7,10 @@ from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKe
 from telegram.error import BadRequest, Forbidden
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 import re
+from dotenv import load_dotenv
+
+# قم بتحميل المتغيرات من ملف .env (وهذا مهم لعمل البوت)
+load_dotenv() 
 
 # --- Settings & Environment Variables ---
 try:
@@ -42,7 +46,13 @@ LANGUAGES = {
         'search_already_in_chat': "You are already in a chat! Press 'Stop' or 'Next' first.",
         'search_already_searching': "You are already searching. Please wait...",
         'search_wait': "🔎 Searching for a partner... Please wait.",
-        'partner_found': "✅ Partner found! The chat has started. (You are anonymous).",
+        
+        # --- التعديل النهائي المطلوب ---
+        'partner_found': "🔥 NEW PARTNER! 🔥\n\n✅ Partner found! The chat has started. (You are anonymous).",
+        'safety_alert': "⚠️ **SAFETY ALERT:** If you receive abusive/unwanted content (spam, explicit images, etc.), press **[Block User 🚫]** on the keyboard immediately. This action will permanently ban the abuser from our system.",
+        'safe_chat_wish': "🥰 We wish you a pleasant chat 🥰",
+        # --- نهاية التعديل ---
+        
         'end_msg_user': "🔚 You have ended the chat.",
         'end_msg_partner': "⚠️ Your partner has left the chat.",
         'end_search_cancel': "Search cancelled.",
@@ -87,7 +97,13 @@ LANGUAGES = {
         'search_already_in_chat': "أنت بالفعل في محادثة! اضغط 'إيقاف' أو 'التالي' أولاً.",
         'search_already_searching': "أنت بالفعل تبحث. يرجى الانتظار...",
         'search_wait': "🔎 البحث عن شريك... يرجى الانتظار.",
-        'partner_found': "✅ تم العثور على شريك! بدأت المحادثة. (أنت مجهول).",
+        
+        # --- التعديل النهائي المطلوب ---
+        'partner_found': "🔥 شريك جديد! 🔥\n\n✅ تم العثور على شريك! بدأت المحادثة. (أنت مجهول).",
+        'safety_alert': "⚠️ **للسلامة:** إذا تعرضت لأي محتوى مسيء أو غير مرغوب فيه (سبام، صور مزعجة، إلخ)، اضغط فوراً على زر **[حظر مستخدم 🚫]** في لوحة مفاتيح البوت. هذا الإجراء سيقوم بحظر المسيء **نهائياً** من نظامنا.",
+        'safe_chat_wish': "🥰 نتمنى لك محادثة لطيفة 🥰",
+        # --- نهاية التعديل ---
+
         'end_msg_user': "🔚 لقد أنهيت المحادثة.",
         'end_msg_partner': "⚠️ لقد غادر شريكك المحادثة.",
         'end_search_cancel': "تم إلغاء البحث.",
@@ -132,7 +148,13 @@ LANGUAGES = {
         'search_already_in_chat': "¡Ya estás en un chat! Presiona 'Parar' o 'Siguiente' primero.",
         'search_already_searching': "Ya estás buscando. Por favor espera...",
         'search_wait': "🔎 Buscando un compañero... Por favor espera.",
-        'partner_found': "✅ ¡Compañero encontrado! El chat ha comenzado. (Eres anónimo).",
+        
+        # --- التعديل النهائي المطلوب ---
+        'partner_found': "🔥 ¡NUEVO COMPAÑERO! 🔥\n\n✅ ¡Compañero encontrado! El chat ha comenzado. (Eres anónimo).",
+        'safety_alert': "⚠️ **SEGURIDAD:** Si recibes contenido no deseado (spam, imágenes explícitas, etc.), presiona el botón **[Bloquear Usuario 🚫]** inmediatamente. Esta acción baneará permanentemente al abusador de nuestro sistema.",
+        'safe_chat_wish': "🥰 Te deseamos un chat agradable 🥰",
+        # --- نهاية التعديل ---
+        
         'end_msg_user': "🔚 Has finalizado el chat.",
         'end_msg_partner': "⚠️ Tu compañero ha abandonado el chat.",
         'end_search_cancel': "Búsqueda cancelada.",
@@ -465,7 +487,7 @@ async def handle_language_selection(update: Update, context: ContextTypes.DEFAUL
             if new_lang_code == 'ar':
                  settings_guidance = "\n\n🌐 يمكنك تغيير اللغة في أي وقت بإرسال /settings."
             elif new_lang_code == 'es':
-                 settings_guidance = "\n\n🌐 Puedes cambiar el idioma في أي وقت بإرسال /settings."
+                 settings_guidance = "\n\n🌐 Puedes cambiar el idioma en cualquier momento enviando /settings."
             else:
                  settings_guidance = "\n\n🌐 You can change the language anytime by typing /settings."
             
@@ -753,12 +775,23 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
             if partner_id:
+                # --- دمج رسالة الترحيب والسلامة ---
+                safety_alert_text = _('safety_alert', lang_code)
+                safe_chat_wish_text = _('safe_chat_wish', lang_code)
+                
+                final_message_user = _('partner_found', lang_code) + "\n\n" + safety_alert_text + "\n\n" + safe_chat_wish_text
+                
+                partner_lang = await get_user_language(partner_id)
+                safety_alert_text_partner = _('safety_alert', partner_lang)
+                safe_chat_wish_text_partner = _('safe_chat_wish', partner_lang)
+                final_message_partner = _('partner_found', partner_lang) + "\n\n" + safety_alert_text_partner + "\n\n" + safe_chat_wish_text_partner
+                # --- نهاية الدمج ---
+
                 await connection.execute("INSERT INTO active_chats (user_id, partner_id) VALUES ($1, $2), ($2, $1)", user_id, partner_id)
                 logger.info(f"Match found! {user_id} <-> {partner_id}. Lang: {current_user_lang}")
                 
-                partner_lang = await get_user_language(partner_id)
-                await context.bot.send_message(chat_id=user_id, text=_('partner_found', lang_code), reply_markup=keyboard, protect_content=True)
-                await context.bot.send_message(chat_id=partner_id, text=_('partner_found', partner_lang), reply_markup=await get_keyboard(partner_lang), protect_content=True)
+                await context.bot.send_message(chat_id=user_id, text=final_message_user, reply_markup=keyboard, protect_content=True)
+                await context.bot.send_message(chat_id=partner_id, text=final_message_partner, reply_markup=await get_keyboard(partner_lang), protect_content=True)
             else:
                 await connection.execute("INSERT INTO waiting_queue (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
                 await update.message.reply_text(_('search_wait', lang_code), protect_content=True)
@@ -846,12 +879,22 @@ async def next_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             
             if partner_id_new:
+                # --- دمج رسالة الترحيب والسلامة ---
+                safety_alert_text = _('safety_alert', lang_code)
+                safe_chat_wish_text = _('safe_chat_wish', lang_code)
+                final_message_user = _('partner_found', lang_code) + "\n\n" + safety_alert_text + "\n\n" + safe_chat_wish_text
+                
+                partner_lang = await get_user_language(partner_id_new)
+                safety_alert_text_partner = _('safety_alert', partner_lang)
+                safe_chat_wish_text_partner = _('safe_chat_wish', partner_lang)
+                final_message_partner = _('partner_found', partner_lang) + "\n\n" + safety_alert_text_partner + "\n\n" + safe_chat_wish_text_partner
+                # --- نهاية الدمج ---
+
                 await connection.execute("INSERT INTO active_chats (user_id, partner_id) VALUES ($1, $2), ($2, $1)", user_id, partner_id_new)
                 logger.info(f"Match found! {user_id} <-> {partner_id_new}. Lang: {current_user_lang}")
                 
-                partner_lang = await get_user_language(partner_id_new)
-                await context.bot.send_message(chat_id=user_id, text=_('partner_found', lang_code), reply_markup=keyboard, protect_content=True)
-                await context.bot.send_message(chat_id=partner_id_new, text=_('partner_found', partner_lang), reply_markup=await get_keyboard(partner_lang), protect_content=True)
+                await context.bot.send_message(chat_id=user_id, text=final_message_user, reply_markup=keyboard, protect_content=True)
+                await context.bot.send_message(chat_id=partner_id_new, text=final_message_partner, reply_markup=await get_keyboard(partner_lang), protect_content=True)
             else:
                 await connection.execute("INSERT INTO waiting_queue (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", user_id)
                 await update.message.reply_text(_('search_wait', lang_code), protect_content=True)
@@ -947,7 +990,7 @@ async def relay_and_log_message(update: Update, context: ContextTypes.DEFAULT_TY
     sender_id = update.message.from_user.id
     message = update.message
     
-    # --- [1. الأرشفة الشاملة (بصيغة التقرير المُحسَّن)] ---
+    # --- [1. الأرشفة الشاملة (بصيغة التقرير المُحسَّن)] ---
     if LOG_CHANNEL_ID and sender_id != ADMIN_ID:
         
         # تحديد حالة الاتصال واسترجاع ID الشريك (إذا وجد)
